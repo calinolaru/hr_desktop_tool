@@ -1,0 +1,6 @@
+pandas
+openpyxl
+pyside6
+docxtpl
+python-docx
+pywin32
