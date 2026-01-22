@@ -13,14 +13,34 @@ def load_and_validate_excel(path):
     if missing:
         raise ValueError(f"Lipsesc coloane: {missing}")
 
-    all_errors = []
+    # Force as string + cleanup common Excel artifacts
+    for col in ["CNP", "IBAN", "Email"]:
+        df[col] = df[col].astype("string")
 
+    # Cleanup CNP: remove ".0", spaces, and turn <NA> into empty
+    df["CNP"] = (
+        df["CNP"]
+        .fillna("")
+        .str.strip()
+        .str.replace(" ", "", regex=False)
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+    # Cleanup IBAN
+    df["IBAN"] = (
+        df["IBAN"]
+        .fillna("")
+        .str.strip()
+        .str.replace(" ", "", regex=False)
+    )
+
+    # Cleanup Email
+    df["Email"] = df["Email"].fillna("").str.strip()
+
+    all_errors = []
     for index, row in df.iterrows():
         errors = validate_row(row)
         if errors:
-            all_errors.append({
-                "row": index + 2,  # Excel row number
-                "errors": errors
-            })
+            all_errors.append({"row": index + 2, "errors": errors})
 
     return df, all_errors
