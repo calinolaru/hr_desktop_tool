@@ -16,14 +16,13 @@ from ui.template_fields_dialog import TemplateFieldsDialog
 
 import re
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
-    QHeaderView, QTabWidget, QPushButton, QMessageBox, QToolBar
+    QVBoxLayout, QTableWidget, QTableWidgetItem,
+    QHeaderView, QTabWidget, QMessageBox, QToolBar
 )
+from PySide6.QtWidgets import QLabel
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
-
-
-
+from PySide6.QtWidgets import QWidget, QSizePolicy, QLabel, QPushButton
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -45,6 +44,18 @@ class MainWindow(QMainWindow):
         self._last_source_path = None
         self._last_df = None
         self._last_generated_docx_dir = None
+        self._last_generated_docx_files = []  # list[Path]
+
+        # --- Menu ---
+        menubar = self.menuBar()
+
+        tools_menu = menubar.addMenu("Tools")
+        act_fields = tools_menu.addAction("Câmpuri template")
+        act_fields.triggered.connect(self.on_show_template_fields)
+
+        help_menu = menubar.addMenu("Help")
+        about_action = help_menu.addAction("About")
+        about_action.triggered.connect(self.on_about)
 
         # --- Toolbar (top actions) ---
         tb = QToolBar("Main")
@@ -53,7 +64,7 @@ class MainWindow(QMainWindow):
         tb.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.addToolBar(tb)
 
-        # Main actions
+        # Main actions (folosite des)
         self.btn_import = QPushButton("Import Excel (.xlsx)")
         self.btn_import.clicked.connect(self.on_import_excel)
 
@@ -69,19 +80,25 @@ class MainWindow(QMainWindow):
         self.btn_generate_pdf.setEnabled(False)
         self.btn_generate_pdf.clicked.connect(self.on_generate_pdf)
 
-        self.btn_fields = QPushButton("Câmpuri template")
-        self.btn_fields.clicked.connect(self.on_show_template_fields)
-
         tb.addWidget(self.btn_import)
         tb.addWidget(self.btn_export)
         tb.addWidget(self.btn_generate)
         tb.addWidget(self.btn_generate_pdf)
-        tb.addWidget(self.btn_fields)
 
-        # Separator visual
         tb.addSeparator()
 
-        # Selection actions (only these 2; no "Selectează tot")
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+
+        # Counter label (Selectate / Valide)
+        self.lbl_counter = QLabel("Selectate: 0 / Valide: 0")
+        self.lbl_counter.setAlignment(Qt.AlignVCenter)
+        tb.addWidget(self.lbl_counter)
+
+        tb.addSeparator()
+
+        # Selection actions (doar astea 2)
         self.btn_select_valid = QPushButton("Selectează valide")
         self.btn_select_valid.setEnabled(False)
         self.btn_select_valid.clicked.connect(self.on_select_valid_only)
@@ -118,6 +135,9 @@ class MainWindow(QMainWindow):
         hhp.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         hhp.setSectionResizeMode(5, QHeaderView.Stretch)
 
+        # contor live când bifezi manual
+        self.table_people.itemChanged.connect(self._on_people_item_changed)
+
         people_layout.addWidget(self.table_people, 1)
         self.tabs.addTab(people_tab, "Angajați")
 
@@ -150,12 +170,6 @@ class MainWindow(QMainWindow):
 
         # Status bar
         self.statusBar().showMessage("Ready")
-
-        # Menu
-        menubar = self.menuBar()
-        help_menu = menubar.addMenu("Help")
-        about_action = help_menu.addAction("About")
-        about_action.triggered.connect(self.on_about)
 
     def safe_name(self, s: str) -> str:
         s = (s or "").strip()
@@ -226,6 +240,7 @@ class MainWindow(QMainWindow):
         invalid_bg = QColor("#3a1e1e")  # roșu închis
         invalid_fg = QColor("#ffd6d6")  # text roz-pal (opțional)
 
+        self.table_people.blockSignals(True)
         self.table_people.setSortingEnabled(False)
         self.table_people.setRowCount(len(df))
 
@@ -273,12 +288,15 @@ class MainWindow(QMainWindow):
 
         self.table_people.setSortingEnabled(True)
 
+        # deblocăm semnalele și actualizăm contorul
+        self.table_people.blockSignals(False)
+        self._update_selection_counter()
+
         # activează butoanele de selecție (dacă le ai)
         if hasattr(self, "btn_select_none"):
             self.btn_select_none.setEnabled(True)
         if hasattr(self, "btn_select_valid"):
             self.btn_select_valid.setEnabled(True)
-
 
     def on_export_errors(self) -> None:
         if not self._last_errors:
@@ -343,7 +361,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Generare DOCX", "Mai întâi importă un fișier Excel.")
             return
 
-        # Template default (poți schimba după)
+        # Template default
         default_template = str(resource_path("templates/contract_template.docx"))
         template_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -362,18 +380,18 @@ class MainWindow(QMainWindow):
         if not out_dir:
             return
 
-        # errors are like: [{"row": 2, "errors": {...}}, ...]
-        # "row" e număr de rând în Excel (header=1, primul data row=2)
+        out_path = Path(out_dir)
+
+        # rânduri invalide din validare
         invalid_excel_rows = {int(e["row"]) for e in (self._last_errors or [])}
 
         warnings_optional_total = set()
         missing_required_total = set()
         skipped_missing_required = 0
+        skipped_validation = 0
         generated = 0
-        skipped_validation = 0  # dacă ai deja logica ta de invalid rows
 
-        # ... (invalid_excel_rows calculat ca înainte)
-
+        # selecția din UI
         selected_excel_rows = set()
         for r in range(self.table_people.rowCount()):
             chk = self.table_people.item(r, 0)
@@ -384,6 +402,9 @@ class MainWindow(QMainWindow):
         if not selected_excel_rows:
             QMessageBox.information(self, "Generare DOCX", "Nu ai selectat nicio persoană pentru export.")
             return
+
+        # lista de DOCX generate (pentru PDF)
+        generated_files = []
 
         for idx, row in self._last_df.iterrows():
             excel_row = idx + 2
@@ -402,12 +423,11 @@ class MainWindow(QMainWindow):
             # 3) dacă lipsesc required template fields -> nu generăm doc
             if missing_required:
                 skipped_missing_required += 1
-                missing_required_total.update(missing_required)  #
+                missing_required_total.update(missing_required)
                 continue
 
             # 4) colectează warnings opționale (non-blocant)
-            for f in missing_optional:
-                warnings_optional_total.add(f)
+            warnings_optional_total.update(missing_optional)
 
             # 5) generează doc
             nume = self.safe_name(str(ctx.get("Nume", "")))
@@ -415,7 +435,6 @@ class MainWindow(QMainWindow):
 
             prefix = self.doc_prefix_from_template(template_path)
             base = f"{prefix}_{nume}_{prenume}"
-            out_path = Path(out_dir)
 
             # 1) nume simplu
             candidate = out_path / f"{base}.docx"
@@ -440,13 +459,20 @@ class MainWindow(QMainWindow):
                 context=ctx,
                 filename=filename
             )
-            generated += 1
 
+            generated += 1
+            generated_files.append(candidate)
+
+        # salvează pentru PDF (respectă batch-ul curent)
+        self._last_generated_docx_dir = out_dir
+        self._last_generated_docx_files = generated_files
+
+        # enable PDF doar dacă s-a generat ceva
+        self.btn_generate_pdf.setEnabled(len(generated_files) > 0)
+
+        # reține lipsurile pt dialogul de câmpuri
         self._last_missing_optional = set(warnings_optional_total)
         self._last_missing_required = set(missing_required_total)
-
-        self._last_generated_docx_dir = out_dir
-        self.btn_generate_pdf.setEnabled(generated > 0)
 
         msg = (
             f"Gata.\n"
@@ -455,9 +481,9 @@ class MainWindow(QMainWindow):
             f"Sărite (lipsesc câmpuri obligatorii în template): {skipped_missing_required}\n"
             f"Folder: {out_dir}"
         )
-
         QMessageBox.information(self, "Generare DOCX", msg)
 
+        # Warning non-blocant pentru opționale
         if warnings_optional_total:
             preview = ", ".join(sorted(list(warnings_optional_total))[:12])
             more = "" if len(warnings_optional_total) <= 12 else f" (+{len(warnings_optional_total) - 12} altele)"
@@ -469,21 +495,35 @@ class MainWindow(QMainWindow):
             )
 
     def on_generate_pdf(self) -> None:
-        if not self._last_generated_docx_dir:
+        files = getattr(self, "_last_generated_docx_files", None)
+        if not files:
             QMessageBox.information(
                 self, "PDF",
-                "Mai întâi generează documentele DOCX."
+                "Nu am o listă de documente generate.\n"
+                "Generează mai întâi DOCX pentru selecția curentă."
             )
             return
 
-        docx_dir = Path(self._last_generated_docx_dir)
+        # păstrează doar fișierele care există (user poate să le fi mutat/șters)
+        existing = [Path(p) for p in files if Path(p).exists()]
+        if not existing:
+            QMessageBox.information(
+                self, "PDF",
+                "Nu găsesc documentele DOCX generate (au fost mutate/șterse?).\n"
+                "Generează din nou DOCX."
+            )
+            return
+
+        # output pdf folder: lângă docx folder
+        docx_dir = existing[0].parent
         pdf_dir = docx_dir.parent / "pdf"
         pdf_dir.mkdir(exist_ok=True)
 
         generated = 0
+        failed = 0
 
         try:
-            for docx_file in docx_dir.glob("*.docx"):
+            for docx_file in existing:
                 pdf_path = pdf_dir / docx_file.with_suffix(".pdf").name
                 docx_to_pdf(docx_file, pdf_path)
                 generated += 1
@@ -526,9 +566,40 @@ class MainWindow(QMainWindow):
 
     def on_select_none(self) -> None:
         self._set_all_checks(Qt.Unchecked)
+        self._update_selection_counter()
 
     def on_select_valid_only(self) -> None:
         self._set_all_checks(Qt.Checked)
+        self._update_selection_counter()
+
+    def _update_selection_counter(self) -> None:
+        if self.table_people.rowCount() == 0:
+            self.lbl_counter.setText("Selectate: 0 / Valide: 0")
+            return
+
+        selected = 0
+        valid = 0
+        for r in range(self.table_people.rowCount()):
+            chk = self.table_people.item(r, 0)
+            if chk is None:
+                continue
+            if chk.flags() & Qt.ItemIsUserCheckable:
+                valid += 1
+                if chk.checkState() == Qt.Checked:
+                    selected += 1
+
+        self.lbl_counter.setText(f"Selectate: {selected} / Valide: {valid}")
+
+    def _on_people_item_changed(self, item: QTableWidgetItem) -> None:
+        # ne interesează doar checkbox-ul din col 0
+        if item.column() != 0:
+            return
+        self._update_selection_counter()
+        self._last_generated_docx_files = []
+        self.btn_generate_pdf.setEnabled(False)
+
+
+
 
 
 
