@@ -4,30 +4,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 from docxtpl import DocxTemplate
+from core.template_mapping import TEMPLATE_FIELD_MAPPING
+import json
 
 
-def row_to_context(row: Any) -> dict[str, Any]:
-    """
-    Transformă un row (pandas Series) în dict pentru docxtpl.
-    Cheile trebuie să corespundă cu placeholder-ele din template.
-    """
-    # Convertim la string unde are sens (HR templates sunt text-heavy)
-    def s(x):
-        if x is None:
-            return ""
-        return str(x)
+def row_to_context(row):
+    context = {}
 
-    return {
-        "Nume": s(row.get("Nume")),
-        "Prenume": s(row.get("Prenume")),
-        "CNP": s(row.get("CNP")),
-        "IBAN": s(row.get("IBAN")),
-        "Email": s(row.get("Email")),
-        "Functie": s(row.get("Functie")),
-        "DataAngajare": s(row.get("DataAngajare")),
-        "NumeComplet": f"{s(row.get('Nume'))} {s(row.get('Prenume'))}".strip(),
-    }
+    for template_field, source in TEMPLATE_FIELD_MAPPING.items():
+        if callable(source):
+            context[template_field] = source(row)
+        else:
+            value = row.get(source, "")
+            context[template_field] = "" if value is None else str(value)
 
+    return context
 
 def generate_docx_for_employee(
     template_path: str | Path,
@@ -45,3 +36,9 @@ def generate_docx_for_employee(
     out_path = output_dir / filename
     doc.save(str(out_path))
     return out_path
+
+def load_company_context():
+    path = Path("config/company.json")
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
