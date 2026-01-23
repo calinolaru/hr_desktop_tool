@@ -3,9 +3,8 @@ from __future__ import annotations
 from core.error_exporter import export_errors_to_xlsx, default_errors_filename
 from pathlib import Path
 from core.document_generator import row_to_context, generate_docx_for_employee
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QMainWindow, QWidget, QVBoxLayout,
     QPushButton, QLabel, QFileDialog, QTableWidget, QTableWidgetItem,
     QMessageBox
 )
@@ -13,32 +12,42 @@ from core.paths import resource_path
 from core.pdf_converter import docx_to_pdf
 from core.excel_loader import load_and_validate_excel
 from core.version import APP_NAME, APP_VERSION
-from PySide6.QtWidgets import QMenuBar
-
+from core.document_generator import build_context_with_missing, generate_docx_for_employee
+from ui.template_fields_dialog import TemplateFieldsDialog
+from PySide6.QtWidgets import QToolBar
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QHeaderView
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("HR Desktop Tool - MVP")
+
+        # Window
         self.resize(900, 600)
         self.setWindowTitle(f"{APP_NAME} - v{APP_VERSION}")
 
         # Root widget
         root = QWidget()
         self.setCentralWidget(root)
+        layout = QVBoxLayout(root)
 
-        # State
+        # State (single source of truth)
+        self._last_missing_optional = set()
+        self._last_missing_required = set()
         self._last_errors = []
         self._last_source_path = None
         self._last_df = None
         self._last_generated_docx_dir = None
 
-        layout = QVBoxLayout(root)
+        # Toolbar (top actions)
+        tb = QToolBar("Main")
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.addToolBar(tb)
 
-        # Top controls
-        top = QHBoxLayout()
-
+        # Buttons
         self.btn_import = QPushButton("Import Excel (.xlsx)")
         self.btn_import.clicked.connect(self.on_import_excel)
 
@@ -54,40 +63,54 @@ class MainWindow(QMainWindow):
         self.btn_generate_pdf.setEnabled(False)
         self.btn_generate_pdf.clicked.connect(self.on_generate_pdf)
 
+        self.btn_fields = QPushButton("Câmpuri template")
+        self.btn_fields.clicked.connect(self.on_show_template_fields)
+
+        tb.addWidget(self.btn_import)
+        tb.addWidget(self.btn_export)
+        tb.addWidget(self.btn_generate)
+        tb.addWidget(self.btn_generate_pdf)
+        tb.addWidget(self.btn_fields)
+
+        # Optional: also keep a label in UI (status bar is primary)
         self.lbl_status = QLabel("Status: Aștept import Excel…")
         self.lbl_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.lbl_status)
 
-        #layout
-        top.addWidget(self.btn_import)
-        top.addWidget(self.btn_export)
-        top.addWidget(self.btn_generate)
-        top.addWidget(self.lbl_status, 1)
-        top.addWidget(self.btn_generate_pdf)
+        # Status bar
+        self.statusBar().showMessage("Ready")
 
-        layout.addLayout(top)
-
+        # Menu
         menubar = self.menuBar()
         help_menu = menubar.addMenu("Help")
         about_action = help_menu.addAction("About")
         about_action.triggered.connect(self.on_about)
 
         # Error table
-        self._last_errors = []
-        self._last_source_path = None
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Excel Row", "Field", "Message"])
         self.table.setSortingEnabled(True)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setAlternatingRowColors(True)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
+
+        hh = self.table.horizontalHeader()
+        hh.setStretchLastSection(True)
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Excel Row
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Field
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)  # Message
 
         layout.addWidget(self.table, 1)
 
-        # Keep last import in memory (for Export)
-        self._last_errors = []
-        self._last_source_path = None
-
+    def safe_name(self, s: str) -> str:
+        s = (s or "").strip()
+        for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
+            s = s.replace(ch, "-")
+        while "  " in s:
+            s = s.replace("  ", " ")
+        return s
 
     def on_import_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -202,22 +225,58 @@ class MainWindow(QMainWindow):
         # "row" e număr de rând în Excel (header=1, primul data row=2)
         invalid_excel_rows = {int(e["row"]) for e in (self._last_errors or [])}
 
+        warnings_optional_total = set()
+        missing_required_total = set()
+        skipped_missing_required = 0
         generated = 0
-        skipped = 0
+        skipped_validation = 0  # dacă ai deja logica ta de invalid rows
 
-        # df index 0 corespunde Excel row 2 (fiindcă header e pe row 1)
+        # ... (invalid_excel_rows calculat ca înainte)
+
         for idx, row in self._last_df.iterrows():
             excel_row = idx + 2
+
+            # 1) sari peste rânduri invalide (din validare)
             if excel_row in invalid_excel_rows:
-                skipped += 1
+                skipped_validation += 1
                 continue
 
-            ctx = row_to_context(row)
+            # 2) construiește context + vezi ce lipsește
+            ctx, missing_required, missing_optional = build_context_with_missing(row)
 
-            # filename safe (înlocuim caractere dubioase)
-            nume = str(ctx.get("Nume", "")).strip().replace("/", "-").replace("\\", "-")
-            prenume = str(ctx.get("Prenume", "")).strip().replace("/", "-").replace("\\", "-")
-            filename = f"Contract_{nume}_{prenume}_row{excel_row}.docx".replace("  ", " ").strip()
+            # 3) dacă lipsesc required template fields -> nu generăm doc
+            if missing_required:
+                skipped_missing_required += 1
+                missing_required_total.update(missing_required)  #
+                continue
+
+            # 4) colectează warnings opționale (non-blocant)
+            for f in missing_optional:
+                warnings_optional_total.add(f)
+
+            # 5) generează doc
+            nume = self.safe_name(str(ctx.get("Nume", "")))
+            prenume = self.safe_name(str(ctx.get("Prenume", "")))
+
+            base = f"Contract_{nume}_{prenume}"
+            out_path = Path(out_dir)
+
+            # 1) nume simplu
+            candidate = out_path / f"{base}.docx"
+
+            # 2) dacă există deja, adaugă ultimele 4 din CNP
+            if candidate.exists():
+                cnp = self.safe_name(str(ctx.get("CNP", "")))
+                last4 = cnp[-4:] if len(cnp) >= 4 else "0000"
+                candidate = out_path / f"{base}_{last4}.docx"
+
+                # 3) dacă și asta există, adaugă _2, _3, ...
+                k = 2
+                while candidate.exists():
+                    candidate = out_path / f"{base}_{last4}_{k}.docx"
+                    k += 1
+
+            filename = candidate.name
 
             generate_docx_for_employee(
                 template_path=template_path,
@@ -227,14 +286,31 @@ class MainWindow(QMainWindow):
             )
             generated += 1
 
+        self._last_missing_optional = set(warnings_optional_total)
+        self._last_missing_required = set(missing_required_total)
+
         self._last_generated_docx_dir = out_dir
         self.btn_generate_pdf.setEnabled(generated > 0)
 
-        QMessageBox.information(
-            self,
-            "Generare DOCX",
-            f"Gata.\nGenerate: {generated}\nSărite (cu erori): {skipped}\nFolder: {out_dir}"
+        msg = (
+            f"Gata.\n"
+            f"Generate: {generated}\n"
+            f"Sărite (validare Excel): {skipped_validation}\n"
+            f"Sărite (lipsesc câmpuri obligatorii în template): {skipped_missing_required}\n"
+            f"Folder: {out_dir}"
         )
+
+        QMessageBox.information(self, "Generare DOCX", msg)
+
+        if warnings_optional_total:
+            preview = ", ".join(sorted(list(warnings_optional_total))[:12])
+            more = "" if len(warnings_optional_total) <= 12 else f" (+{len(warnings_optional_total) - 12} altele)"
+            QMessageBox.warning(
+                self,
+                "Atenție: câmpuri opționale lipsă",
+                "Unele câmpuri opționale nu au fost completate și au fost înlocuite cu „—”.\n\n"
+                f"Câmpuri: {preview}{more}"
+            )
 
     def on_generate_pdf(self) -> None:
         if not self._last_generated_docx_dir:
@@ -275,6 +351,14 @@ class MainWindow(QMainWindow):
             f"{APP_NAME}\nVersion: {APP_VERSION}\n{APP_COPYRIGHT}\n\n"
             "MVP: Import Excel → Validare → DOCX/PDF"
         )
+
+    def on_show_template_fields(self) -> None:
+        dlg = TemplateFieldsDialog(
+            self,
+            missing_optional=getattr(self, "_last_missing_optional", set()),
+            missing_required=getattr(self, "_last_missing_required", set()),
+        )
+        dlg.exec()
 
 
 
