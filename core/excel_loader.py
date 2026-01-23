@@ -1,5 +1,6 @@
-import pandas as pd
 from core.validation_engine import validate_row
+from datetime import datetime, date
+import pandas as pd
 
 REQUIRED_COLUMNS = [
     "Nume", "Prenume", "CNP", "IBAN",
@@ -14,8 +15,9 @@ def load_and_validate_excel(path):
         raise ValueError(f"Lipsesc coloane: {missing}")
 
     # Force as string + cleanup common Excel artifacts
-    for col in ["CNP", "IBAN", "Email"]:
-        df[col] = df[col].astype("string")
+    for col in ["CNP", "IBAN", "Email", "DataAngajare"]:
+        if col in df.columns:
+            df[col] = df[col].astype("string")
 
     # Cleanup CNP: remove ".0", spaces, and turn <NA> into empty
     df["CNP"] = (

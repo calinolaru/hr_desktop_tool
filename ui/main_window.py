@@ -4,9 +4,8 @@ from core.error_exporter import export_errors_to_xlsx, default_errors_filename
 from pathlib import Path
 from core.document_generator import row_to_context, generate_docx_for_employee
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout,
-    QPushButton, QLabel, QFileDialog, QTableWidget, QTableWidgetItem,
-    QMessageBox
+    QMainWindow, QFileDialog
+
 )
 from core.paths import resource_path
 from core.pdf_converter import docx_to_pdf
@@ -14,9 +13,16 @@ from core.excel_loader import load_and_validate_excel
 from core.version import APP_NAME, APP_VERSION
 from core.document_generator import build_context_with_missing, generate_docx_for_employee
 from ui.template_fields_dialog import TemplateFieldsDialog
-from PySide6.QtWidgets import QToolBar
+
+import re
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
+    QHeaderView, QTabWidget, QPushButton, QMessageBox, QToolBar
+)
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHeaderView
+from PySide6.QtGui import QColor
+
+
 
 
 class MainWindow(QMainWindow):
@@ -32,7 +38,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
 
-        # State (single source of truth)
+        # --- State (single source of truth) ---
         self._last_missing_optional = set()
         self._last_missing_required = set()
         self._last_errors = []
@@ -40,14 +46,14 @@ class MainWindow(QMainWindow):
         self._last_df = None
         self._last_generated_docx_dir = None
 
-        # Toolbar (top actions)
+        # --- Toolbar (top actions) ---
         tb = QToolBar("Main")
         tb.setMovable(False)
         tb.setFloatable(False)
         tb.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.addToolBar(tb)
 
-        # Buttons
+        # Main actions
         self.btn_import = QPushButton("Import Excel (.xlsx)")
         self.btn_import.clicked.connect(self.on_import_excel)
 
@@ -55,7 +61,7 @@ class MainWindow(QMainWindow):
         self.btn_export.setEnabled(False)
         self.btn_export.clicked.connect(self.on_export_errors)
 
-        self.btn_generate = QPushButton("Generează DOCX (rânduri valide)")
+        self.btn_generate = QPushButton("Generează DOCX (selectate)")
         self.btn_generate.setEnabled(False)
         self.btn_generate.clicked.connect(self.on_generate_docx)
 
@@ -72,7 +78,72 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.btn_generate_pdf)
         tb.addWidget(self.btn_fields)
 
-        # Optional: also keep a label in UI (status bar is primary)
+        # Separator visual
+        tb.addSeparator()
+
+        # Selection actions (only these 2; no "Selectează tot")
+        self.btn_select_valid = QPushButton("Selectează valide")
+        self.btn_select_valid.setEnabled(False)
+        self.btn_select_valid.clicked.connect(self.on_select_valid_only)
+
+        self.btn_select_none = QPushButton("Deselectează tot")
+        self.btn_select_none.setEnabled(False)
+        self.btn_select_none.clicked.connect(self.on_select_none)
+
+        tb.addWidget(self.btn_select_valid)
+        tb.addWidget(self.btn_select_none)
+
+        # --- Tabs ---
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
+
+        # --- Tab: Angajați (select export) ---
+        people_tab = QWidget()
+        people_layout = QVBoxLayout(people_tab)
+
+        self.table_people = QTableWidget(0, 6)
+        self.table_people.setHorizontalHeaderLabels(["Export", "Excel Row", "Nume", "Prenume", "CNP", "Email"])
+        self.table_people.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table_people.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table_people.setAlternatingRowColors(True)
+        self.table_people.setShowGrid(False)
+        self.table_people.verticalHeader().setVisible(False)
+
+        hhp = self.table_people.horizontalHeader()
+        hhp.setStretchLastSection(True)
+        hhp.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # checkbox
+        hhp.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # excel row
+        hhp.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hhp.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hhp.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        hhp.setSectionResizeMode(5, QHeaderView.Stretch)
+
+        people_layout.addWidget(self.table_people, 1)
+        self.tabs.addTab(people_tab, "Angajați")
+
+        # --- Tab: Erori ---
+        errors_tab = QWidget()
+        errors_layout = QVBoxLayout(errors_tab)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Excel Row", "Field", "Message"])
+        self.table.setSortingEnabled(True)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
+
+        hhe = self.table.horizontalHeader()
+        hhe.setStretchLastSection(True)
+        hhe.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hhe.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hhe.setSectionResizeMode(2, QHeaderView.Stretch)
+
+        errors_layout.addWidget(self.table, 1)
+        self.tabs.addTab(errors_tab, "Erori")
+
+        # Status label (optional)
         self.lbl_status = QLabel("Status: Aștept import Excel…")
         self.lbl_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.lbl_status)
@@ -86,24 +157,6 @@ class MainWindow(QMainWindow):
         about_action = help_menu.addAction("About")
         about_action.triggered.connect(self.on_about)
 
-        # Error table
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Excel Row", "Field", "Message"])
-        self.table.setSortingEnabled(True)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(False)
-        self.table.verticalHeader().setVisible(False)
-
-        hh = self.table.horizontalHeader()
-        hh.setStretchLastSection(True)
-        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Excel Row
-        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Field
-        hh.setSectionResizeMode(2, QHeaderView.Stretch)  # Message
-
-        layout.addWidget(self.table, 1)
-
     def safe_name(self, s: str) -> str:
         s = (s or "").strip()
         for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
@@ -111,6 +164,20 @@ class MainWindow(QMainWindow):
         while "  " in s:
             s = s.replace("  ", " ")
         return s
+
+    def doc_prefix_from_template(self, template_path: str) -> str:
+        name = Path(template_path).stem  # ex: "contract_template"
+        name = re.sub(r"(template|tmpl|model)$", "", name, flags=re.IGNORECASE)
+        name = name.replace("-", "_").replace(" ", "_")
+        name = name.strip("_")
+
+        # Mapări friendly (opțional)
+        mapping = {
+            "contract": "Contract",
+            "act_aditional": "Act_Aditional",
+            "decizie": "Decizie",
+        }
+        return mapping.get(name.lower(), name.title().replace("__", "_") or "Document")
 
     def on_import_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -124,20 +191,94 @@ class MainWindow(QMainWindow):
 
         try:
             df, errors = load_and_validate_excel(path)
+
+            self._last_df = df
             self._last_errors = errors
             self._last_source_path = path
+
             self.btn_export.setEnabled(len(errors) > 0)
-            self._last_df = df
-            self.btn_generate.setEnabled(len(df) > 0)  # îl lăsăm activ chiar dacă există erori, va genera doar valide
+            self.btn_generate.setEnabled(len(df) > 0)
 
         except Exception as e:
             QMessageBox.critical(self, "Eroare la import", str(e))
             return
 
+        # Umple tabelul de erori (tab Erori)
         self.populate_errors(errors)
+
+        # Umple tabelul de angajați (tab Angajați) + evidențiere invalid
+        self._populate_people_table()
+
         self.lbl_status.setText(
             f"Status: Import OK | Rânduri: {len(df)} | Erori: {len(errors)} | Fișier: {path}"
         )
+
+    def _populate_people_table(self) -> None:
+        if self._last_df is None:
+            self.table_people.setRowCount(0)
+            return
+
+        # set de rânduri invalide din validare (Excel row: 2..)
+        invalid_excel_rows = {int(e["row"]) for e in (self._last_errors or [])}
+        df = self._last_df
+
+        # culori (subtil, nu țipător)
+        invalid_bg = QColor("#3a1e1e")  # roșu închis
+        invalid_fg = QColor("#ffd6d6")  # text roz-pal (opțional)
+
+        self.table_people.setSortingEnabled(False)
+        self.table_people.setRowCount(len(df))
+
+        for i, (_, row) in enumerate(df.iterrows()):
+            excel_row = i + 2
+            is_invalid = excel_row in invalid_excel_rows
+
+            # Col 0: checkbox "Export"
+            chk = QTableWidgetItem()
+            if is_invalid:
+                # Rând invalid: checkbox dezactivat
+                chk.setFlags(Qt.ItemIsEnabled)  # fără ItemIsUserCheckable
+                chk.setCheckState(Qt.Unchecked)
+                chk.setToolTip("Rând invalid (are erori). Vezi tab-ul „Erori”.")
+            else:
+                chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                chk.setCheckState(Qt.Checked)
+                chk.setToolTip("Selectat pentru export")
+
+            self.table_people.setItem(i, 0, chk)
+
+            # Restul coloanelor (1..5)
+            values = [
+                str(excel_row),
+                str(row.get("Nume", "")),
+                str(row.get("Prenume", "")),
+                str(row.get("CNP", "")),
+                str(row.get("Email", "")),
+            ]
+
+            for col, val in enumerate(values, start=1):
+                item = QTableWidgetItem(val)
+                if is_invalid:
+                    item.setToolTip("Rând invalid (are erori). Vezi tab-ul „Erori”.")
+                self.table_people.setItem(i, col, item)
+
+            # Evidențiere vizuală pentru rând invalid (toate coloanele)
+            if is_invalid:
+                for col in range(0, 6):
+                    cell = self.table_people.item(i, col)
+                    if cell:
+                        cell.setBackground(invalid_bg)
+                        # opțional: text mai deschis
+                        cell.setForeground(invalid_fg)
+
+        self.table_people.setSortingEnabled(True)
+
+        # activează butoanele de selecție (dacă le ai)
+        if hasattr(self, "btn_select_none"):
+            self.btn_select_none.setEnabled(True)
+        if hasattr(self, "btn_select_valid"):
+            self.btn_select_valid.setEnabled(True)
+
 
     def on_export_errors(self) -> None:
         if not self._last_errors:
@@ -233,8 +374,22 @@ class MainWindow(QMainWindow):
 
         # ... (invalid_excel_rows calculat ca înainte)
 
+        selected_excel_rows = set()
+        for r in range(self.table_people.rowCount()):
+            chk = self.table_people.item(r, 0)
+            if chk and chk.checkState() == Qt.Checked:
+                excel_row = int(self.table_people.item(r, 1).text())
+                selected_excel_rows.add(excel_row)
+
+        if not selected_excel_rows:
+            QMessageBox.information(self, "Generare DOCX", "Nu ai selectat nicio persoană pentru export.")
+            return
+
         for idx, row in self._last_df.iterrows():
             excel_row = idx + 2
+
+            if excel_row not in selected_excel_rows:
+                continue
 
             # 1) sari peste rânduri invalide (din validare)
             if excel_row in invalid_excel_rows:
@@ -258,7 +413,8 @@ class MainWindow(QMainWindow):
             nume = self.safe_name(str(ctx.get("Nume", "")))
             prenume = self.safe_name(str(ctx.get("Prenume", "")))
 
-            base = f"Contract_{nume}_{prenume}"
+            prefix = self.doc_prefix_from_template(template_path)
+            base = f"{prefix}_{nume}_{prenume}"
             out_path = Path(out_dir)
 
             # 1) nume simplu
@@ -359,6 +515,22 @@ class MainWindow(QMainWindow):
             missing_required=getattr(self, "_last_missing_required", set()),
         )
         dlg.exec()
+
+    def _set_all_checks(self, state: Qt.CheckState) -> None:
+        for r in range(self.table_people.rowCount()):
+            item = self.table_people.item(r, 0)
+            if item is None:
+                continue
+            if item.flags() & Qt.ItemIsUserCheckable:
+                item.setCheckState(state)
+
+    def on_select_none(self) -> None:
+        self._set_all_checks(Qt.Unchecked)
+
+    def on_select_valid_only(self) -> None:
+        self._set_all_checks(Qt.Checked)
+
+
 
 
 
