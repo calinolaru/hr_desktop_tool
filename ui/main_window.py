@@ -5,7 +5,6 @@ from pathlib import Path
 from core.document_generator import row_to_context, generate_docx_for_employee
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog
-
 )
 from core.paths import resource_path
 from core.pdf_converter import docx_to_pdf
@@ -13,13 +12,14 @@ from core.excel_loader import load_and_validate_excel
 from core.version import APP_NAME, APP_VERSION
 from core.document_generator import build_context_with_missing, generate_docx_for_employee
 from ui.template_fields_dialog import TemplateFieldsDialog
-
+from core.version import APP_NAME, APP_VERSION, APP_COPYRIGHT
+from core.document_generator import load_company_context
+from PySide6.QtWidgets import QLineEdit, QHBoxLayout
 import re
 from PySide6.QtWidgets import (
     QVBoxLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QTabWidget, QMessageBox, QToolBar
 )
-from PySide6.QtWidgets import QLabel
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QWidget, QSizePolicy, QLabel, QPushButton
@@ -45,6 +45,7 @@ class MainWindow(QMainWindow):
         self._last_df = None
         self._last_generated_docx_dir = None
         self._last_generated_docx_files = []  # list[Path]
+        self._last_template_path = None
 
         # --- Menu ---
         menubar = self.menuBar()
@@ -117,6 +118,22 @@ class MainWindow(QMainWindow):
         # --- Tab: Angajați (select export) ---
         people_tab = QWidget()
         people_layout = QVBoxLayout(people_tab)
+
+        search_row = QHBoxLayout()
+        lbl = QLabel("Caută:")
+        self.txt_search = QLineEdit()
+        self.txt_search.setPlaceholderText("Nume / Prenume (ex: Popescu, Ion)")
+        self.txt_search.textChanged.connect(self.on_search_people)
+
+        self.btn_clear_search = QPushButton("X")
+        self.btn_clear_search.setFixedWidth(28)
+        self.btn_clear_search.clicked.connect(lambda: self.txt_search.setText(""))
+
+        search_row.addWidget(lbl)
+        search_row.addWidget(self.txt_search, 1)
+        search_row.addWidget(self.btn_clear_search)
+
+        people_layout.addLayout(search_row)
 
         self.table_people = QTableWidget(0, 6)
         self.table_people.setHorizontalHeaderLabels(["Export", "Excel Row", "Nume", "Prenume", "CNP", "Email"])
@@ -372,6 +389,8 @@ class MainWindow(QMainWindow):
         if not template_path:
             return
 
+        self._last_template_path = template_path
+
         out_dir = QFileDialog.getExistingDirectory(
             self,
             "Selectează folderul de output pentru DOCX",
@@ -385,9 +404,7 @@ class MainWindow(QMainWindow):
         # rânduri invalide din validare
         invalid_excel_rows = {int(e["row"]) for e in (self._last_errors or [])}
 
-        warnings_optional_total = set()
-        missing_required_total = set()
-        skipped_missing_required = 0
+        warnings_optional_total: set[str] = set()
         skipped_validation = 0
         generated = 0
 
@@ -404,7 +421,7 @@ class MainWindow(QMainWindow):
             return
 
         # lista de DOCX generate (pentru PDF)
-        generated_files = []
+        generated_files: list[Path] = []
 
         for idx, row in self._last_df.iterrows():
             excel_row = idx + 2
@@ -412,43 +429,45 @@ class MainWindow(QMainWindow):
             if excel_row not in selected_excel_rows:
                 continue
 
-            # 1) sari peste rânduri invalide (din validare)
+            # sari peste rânduri invalide (din validare)
             if excel_row in invalid_excel_rows:
                 skipped_validation += 1
                 continue
 
-            # 2) construiește context + vezi ce lipsește
-            ctx, missing_required, missing_optional = build_context_with_missing(row)
+            # context dinamic (toate coloanele) + company.json
+            ctx, _missing_required, missing_optional = build_context_with_missing(row)
 
-            # 3) dacă lipsesc required template fields -> nu generăm doc
-            if missing_required:
-                skipped_missing_required += 1
-                missing_required_total.update(missing_required)
-                continue
-
-            # 4) colectează warnings opționale (non-blocant)
+            # colectăm warnings (coloane lipsă -> fallback "—")
             warnings_optional_total.update(missing_optional)
 
-            # 5) generează doc
-            nume = self.safe_name(str(ctx.get("Nume", "")))
-            prenume = self.safe_name(str(ctx.get("Prenume", "")))
+            # --- nume fișier ---
+            # dacă Nume/Prenume lipsesc, folosim excel_row ca fallback ca să nu iasă "—"
+            raw_nume = str(ctx.get("Nume", "")).strip()
+            raw_prenume = str(ctx.get("Prenume", "")).strip()
+
+            nume = self.safe_name(raw_nume) if raw_nume and raw_nume != "—" else f"Row{excel_row}"
+            prenume = self.safe_name(raw_prenume) if raw_prenume and raw_prenume != "—" else ""
 
             prefix = self.doc_prefix_from_template(template_path)
-            base = f"{prefix}_{nume}_{prenume}"
 
-            # 1) nume simplu
+            base = f"{prefix}_{nume}"
+            if prenume:
+                base += f"_{prenume}"
+
             candidate = out_path / f"{base}.docx"
 
-            # 2) dacă există deja, adaugă ultimele 4 din CNP
+            # dacă există deja, încearcă să distingă cu ultimele 4 din CNP (dacă există)
             if candidate.exists():
-                cnp = self.safe_name(str(ctx.get("CNP", "")))
-                last4 = cnp[-4:] if len(cnp) >= 4 else "0000"
-                candidate = out_path / f"{base}_{last4}.docx"
+                cnp = str(ctx.get("CNP", "")).strip()
+                cnp = cnp if cnp and cnp != "—" else ""
+                if len(cnp) >= 4:
+                    last4 = self.safe_name(cnp[-4:])
+                    candidate = out_path / f"{base}_{last4}.docx"
 
-                # 3) dacă și asta există, adaugă _2, _3, ...
+                # dacă și așa există, pune sufix incremental
                 k = 2
                 while candidate.exists():
-                    candidate = out_path / f"{base}_{last4}_{k}.docx"
+                    candidate = out_path / f"{base}_dup{k}.docx"
                     k += 1
 
             filename = candidate.name
@@ -470,27 +489,26 @@ class MainWindow(QMainWindow):
         # enable PDF doar dacă s-a generat ceva
         self.btn_generate_pdf.setEnabled(len(generated_files) > 0)
 
-        # reține lipsurile pt dialogul de câmpuri
+        # reține lipsurile pt dialogul de câmpuri (acum sunt doar "coloane goale")
         self._last_missing_optional = set(warnings_optional_total)
-        self._last_missing_required = set(missing_required_total)
+        self._last_missing_required = set()  # nu mai există required
 
         msg = (
             f"Gata.\n"
             f"Generate: {generated}\n"
             f"Sărite (validare Excel): {skipped_validation}\n"
-            f"Sărite (lipsesc câmpuri obligatorii în template): {skipped_missing_required}\n"
             f"Folder: {out_dir}"
         )
         QMessageBox.information(self, "Generare DOCX", msg)
 
-        # Warning non-blocant pentru opționale
+        # Warning non-blocant pentru câmpuri goale
         if warnings_optional_total:
             preview = ", ".join(sorted(list(warnings_optional_total))[:12])
             more = "" if len(warnings_optional_total) <= 12 else f" (+{len(warnings_optional_total) - 12} altele)"
             QMessageBox.warning(
                 self,
-                "Atenție: câmpuri opționale lipsă",
-                "Unele câmpuri opționale nu au fost completate și au fost înlocuite cu „—”.\n\n"
+                "Atenție: câmpuri goale",
+                "Unele coloane din Excel nu au fost completate și au fost înlocuite cu „—”.\n\n"
                 f"Câmpuri: {preview}{more}"
             )
 
@@ -521,26 +539,37 @@ class MainWindow(QMainWindow):
 
         generated = 0
         failed = 0
+        failed_files = []
 
-        try:
-            for docx_file in existing:
+        for docx_file in existing:
+            try:
                 pdf_path = pdf_dir / docx_file.with_suffix(".pdf").name
                 docx_to_pdf(docx_file, pdf_path)
                 generated += 1
-        except Exception as e:
-            QMessageBox.critical(self, "Eroare PDF", str(e))
+            except Exception as e:
+                failed += 1
+                failed_files.append(f"{docx_file.name}: {e}")
+
+        if failed == 0:
+            QMessageBox.information(
+                self,
+                "PDF generate",
+                f"Gata.\nPDF-uri generate: {generated}\nFolder: {pdf_dir}"
+            )
             return
 
-        QMessageBox.information(
+        # dacă au fost erori, arată un sumar + primele N
+        preview = "\n".join(failed_files[:8])
+        more = "" if len(failed_files) <= 8 else f"\n(+{len(failed_files) - 8} altele)"
+
+        QMessageBox.warning(
             self,
-            "PDF generate",
-            f"Gata.\nPDF-uri generate: {generated}\nFolder: {pdf_dir}"
+            "PDF generate (cu erori)",
+            f"Gata.\nPDF-uri generate: {generated}\nEșuate: {failed}\nFolder: {pdf_dir}\n\n"
+            f"Detalii:\n{preview}{more}"
         )
 
     def on_about(self) -> None:
-        from PySide6.QtWidgets import QMessageBox
-        from core.version import APP_NAME, APP_VERSION, APP_COPYRIGHT
-
         QMessageBox.information(
             self,
             "About",
@@ -549,10 +578,16 @@ class MainWindow(QMainWindow):
         )
 
     def on_show_template_fields(self) -> None:
+        if self._last_df is None:
+            QMessageBox.information(self, "Câmpuri", "Mai întâi importă un fișier Excel.")
+            return
+
+        company_ctx = load_company_context()
+
         dlg = TemplateFieldsDialog(
             self,
-            missing_optional=getattr(self, "_last_missing_optional", set()),
-            missing_required=getattr(self, "_last_missing_required", set()),
+            excel_columns=list(self._last_df.columns),
+            company_keys=list(company_ctx.keys()),
         )
         dlg.exec()
 
@@ -597,6 +632,19 @@ class MainWindow(QMainWindow):
         self._update_selection_counter()
         self._last_generated_docx_files = []
         self.btn_generate_pdf.setEnabled(False)
+
+    def on_search_people(self, text: str) -> None:
+        q = (text or "").strip().lower()
+
+        for r in range(self.table_people.rowCount()):
+            # Col 2 = Nume, Col 3 = Prenume (din tabelul tău)
+            nume = (self.table_people.item(r, 2).text() if self.table_people.item(r, 2) else "").lower()
+            prenume = (self.table_people.item(r, 3).text() if self.table_people.item(r, 3) else "").lower()
+            full = f"{nume} {prenume}".strip()
+
+            match = (q in nume) or (q in prenume) or (q in full) if q else True
+            self.table_people.setRowHidden(r, not match)
+
 
 
 

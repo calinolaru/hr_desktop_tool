@@ -1,146 +1,72 @@
-# HRTool
+# HR Desktop Tool
 
-**HRTool** is a Windows desktop application designed for HR teams to automate the processing of employee data from Excel files. It validates data, reports errors clearly, and generates professional documents (DOCX and PDF) only for valid entries.
-
----
-
-## ✨ Key Features
-
-* **Excel Import (.xlsx)** – Load employee data from a predefined Excel template
-* **Data Validation** – Automatic checks for:
-
-  * CNP (length, digits, Excel formatting issues)
-  * IBAN (basic structure)
-  * Email format
-  * Required fields
-* **Error Reporting**
-
-  * On-screen table with row / field / message
-  * Export error report to Excel (.xlsx)
-* **Document Generation**
-
-  * Generate one **DOCX per valid employee** from a Word template
-  * Generate **PDF files automatically** from DOCX (via Microsoft Word)
-* **Safe Workflow**
-
-  * Rows with errors are skipped
-  * Only valid data produces documents
+Aplicație desktop pentru generarea automată de documente HR (DOCX / PDF) pe baza unui fișier Excel (.xlsx).
+Scopul aplicației este eliminarea muncii repetitive (copy–paste) și reducerea erorilor umane în documentele HR.
 
 ---
 
-## 🧩 Typical Workflow
+## Funcționalități principale
 
-1. HR prepares an Excel file with employee data
-2. Import the Excel file into HRTool
-3. Review validation errors (if any)
-4. Export error report (optional)
-5. Fix errors in Excel
-6. Generate DOCX documents for valid rows
-7. Generate PDF documents
-
----
-
-## 📁 Expected Excel Format
-
-The Excel file **must contain the following columns** (exact names):
-
-* `Nume`
-* `Prenume`
-* `CNP`
-* `IBAN`
-* `Email`
-* `Functie`
-* `DataAngajare`
-
-### ⚠️ Important Excel Notes
-
-* Columns **CNP** and **IBAN must be formatted as TEXT**, not Number
-* Otherwise Excel may convert values to scientific notation (e.g. `1.99E+12`)
+- Import fișier Excel (.xlsx)
+- Validare date (ex: CNP, IBAN, Email)
+- Raport de erori exportabil în Excel
+- Listă angajați cu selecție individuală pentru export
+- Evidențiere vizuală a rândurilor invalide
+- Căutare rapidă după Nume / Prenume
+- Generare documente DOCX din template Word
+- Conversie DOCX → PDF
+- Suport pentru câmpuri dinamice (coloane Excel)
+- Fallback automat pentru câmpuri lipsă (`—`)
+- Suport pentru mai multe tipuri de documente (contract, act adițional etc.)
 
 ---
 
-## 📝 Word Template
+## Conceptul de date
 
-The DOCX template must contain placeholders using this syntax:
+### Excel = sursa principală de date
 
-```
+- Prima linie din Excel este header-ul
+- Fiecare coloană devine automat un câmp utilizabil în template-ul Word
+- Nu este necesară configurare suplimentară
+
+### Coloane obligatorii
+
+Fișierul Excel trebuie să conțină obligatoriu:
+
+- `Nume`
+- `Prenume`
+
+Acestea sunt folosite pentru:
+- identificarea angajaților
+- căutare rapidă
+- generarea numelui fișierelor
+
+Toate celelalte coloane sunt opționale.
+
+---
+
+## Template DOCX
+
+- Template-urile sunt fișiere Word standard (.docx)
+- Câmpurile se scriu sub forma:
+
 {{Nume}}
 {{Prenume}}
-{{NumeComplet}}
-{{CNP}}
-{{IBAN}}
-{{Email}}
 {{Functie}}
-{{DataAngajare}}
-```
+{{OriceAltaColoana}}
 
-Example text in template:
+### Reguli importante
 
-> Subsemnatul/a **{{NumeComplet}}**, CNP **{{CNP}}**, angajat pe funcția **{{Functie}}** începând cu **{{DataAngajare}}**.
-
----
-
-## 🖨️ PDF Generation Requirements
-
-To generate PDF files:
-
-* **Microsoft Word must be installed** on the machine
-* Conversion is done automatically via Word (COM automation)
-
-If Word is not installed, DOCX generation will still work.
+- Dacă o coloană există în Excel → valoarea este înlocuită
+- Dacă o coloană este goală → se folosește fallback `—`
+- Dacă un câmp din template NU există în Excel → se folosește fallback `—`
+- Documentul se generează fără erori în toate cazurile
 
 ---
 
-## 💻 System Requirements
+## Instalare (Developer / local)
 
-* Windows 10 / 11
-* Microsoft Word (for PDF export)
-* No Python installation required for end users
+### 1. Creează virtual environment
 
----
-
-## 📦 Application Distribution
-
-HRTool is distributed as a Windows executable:
-
-```
-HRTool/
-├── HRTool.exe
-└── _internal/
-```
-
-To run the application:
-
-1. Extract the folder
-2. Double-click `HRTool.exe`
-
----
-
-## 🔒 Source Code & Licensing
-
-* Source code is private
-* End users receive only the compiled executable
-* Custom licensing / trial mechanisms can be added if required
-
----
-
-## 🚀 Status
-
-This project is an MVP focused on real HR workflows and automation. The application is stable, production-ready, and designed to be extended with additional validations and document types.
-
----
-
-## 📞 Support
-
-For issues related to:
-
-* Excel formatting
-* Validation errors
-* Document templates
-
-Please ensure the input data follows the documented format before reporting issues.
-
----
-
-© 2026 HRTool
-
+```bash
+python -m venv .venv

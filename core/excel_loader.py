@@ -1,11 +1,7 @@
 from core.validation_engine import validate_row
-from datetime import datetime, date
 import pandas as pd
 
-REQUIRED_COLUMNS = [
-    "Nume", "Prenume", "CNP", "IBAN",
-    "Email", "Functie", "DataAngajare"
-]
+REQUIRED_COLUMNS = ["Nume", "Prenume"]
 
 def load_and_validate_excel(path):
     df = pd.read_excel(path)
