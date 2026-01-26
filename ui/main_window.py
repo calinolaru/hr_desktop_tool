@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QTabWidget, QMessageBox, QToolBar
 )
+from ui.license_info_dialog import LicenseInfoDialog
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QWidget, QSizePolicy, QLabel, QPushButton
@@ -569,12 +570,20 @@ class MainWindow(QMainWindow):
         )
 
     def on_about(self) -> None:
-        QMessageBox.information(
-            self,
-            "About",
-            f"{APP_NAME}\nVersion: {APP_VERSION}\n{APP_COPYRIGHT}\n\n"
-            "MVP: Import Excel → Validare → DOCX/PDF"
-        )
+        from PySide6.QtWidgets import QMessageBox
+        from core.version import APP_NAME, APP_VERSION, APP_COPYRIGHT
+
+        lic = getattr(self, "_license_info", None)
+
+        if lic:
+            dlg = LicenseInfoDialog(lic, parent=self)
+            dlg.exec()
+        else:
+            QMessageBox.information(
+                self,
+                "About",
+                f"{APP_NAME}\nVersion: {APP_VERSION}\n{APP_COPYRIGHT}"
+            )
 
     def on_show_template_fields(self) -> None:
         if self._last_df is None:

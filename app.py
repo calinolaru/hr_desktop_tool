@@ -1,8 +1,8 @@
 # app.py
 from __future__ import annotations
-
 import sys
 from PySide6.QtWidgets import QApplication, QMessageBox
+from core.license_manager import app_base_dir
 from ui.main_window import MainWindow
 from core.license_manager import load_and_validate_license, LicenseError
 from core.machine_fingerprint import get_machine_fingerprint
@@ -14,28 +14,36 @@ def main() -> None:
     app.setStyleSheet(APP_QSS)
 
     try:
+        # asigură folder config lângă aplicație
+        config_dir = app_base_dir() / "config"
+        config_dir.mkdir(exist_ok=True)
+
         lic = load_and_validate_license()
+
     except LicenseError as e:
         machine_id = get_machine_fingerprint()
 
-        # 1) Print în consolă (copy-paste ușor)
-        print("\n=== HR TOOL MACHINE ID ===")
-        print(machine_id)
-        print("==========================\n")
+        # machine_id.txt LÂNGĂ EXE
+        out = app_base_dir() / "machine_id.txt"
 
-        # 2) Popup informativ
+        # scrie DOAR dacă nu există
+        if not out.exists():
+            try:
+                out.write_text(machine_id, encoding="utf-8")
+            except Exception:
+                pass
+
         QMessageBox.critical(
             None,
-            "Licență",
+            "Licență lipsă / invalidă",
             f"{str(e)}\n\n"
-            "Machine ID (copie din consolă / terminal):\n"
-            f"{machine_id}\n\n"
-            "Tip: Rulează aplicația din PowerShell/CMD ca să poți copia din terminal."
+            "Machine ID este disponibil în fișierul:\n"
+            f"{out.resolve()}\n\n"
+            "Trimite acest fișier furnizorului."
         )
-        return
+        return  # IMPORTANT: nu continua, altfel 'lic' nu există
 
     w = MainWindow()
-    # opțional: ținem licența pe fereastră (About/status)
     w._license_info = lic  # type: ignore[attr-defined]
     w.show()
 
