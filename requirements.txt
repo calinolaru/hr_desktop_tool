@@ -4,3 +4,5 @@ pyside6
 docxtpl
 python-docx
 pywin32
+cryptography>=42
+

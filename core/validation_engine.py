@@ -1,83 +1,86 @@
-from core.validators import (
-    validate_required,
-    validate_email,
-    validate_iban,
-    validate_cnp
-)
-from datetime import datetime, date
+# core/validation_engine.py
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import Any
+
 import pandas as pd
 
+from core.constants import REQUIRED_EXCEL_COLUMNS
+from core.validators import validate_cnp, validate_email, validate_iban, validate_required
 
-def _parse_date_strict(value) -> bool:
-    """
-    True dacă valoarea reprezintă o dată validă.
-    Acceptă:
-      - datetime / date (citit automat din Excel)
-      - string: YYYY-MM-DD, DD.MM.YYYY, DD/MM/YYYY
-    """
+
+def _is_empty(value: Any) -> bool:
     if value is None:
-        return False
-
-    # pandas NA
+        return True
     try:
         if pd.isna(value):
-            return False
+            return True
     except Exception:
         pass
+    return str(value).strip() == ""
 
-    # date native (Excel)
+
+def _parse_date_strict(value: Any) -> bool:
+    """
+    True dacă value e o dată validă.
+    Acceptă:
+      - datetime/date (citite automat din Excel)
+      - string: YYYY-MM-DD, DD.MM.YYYY, DD/MM/YYYY
+    """
+    if _is_empty(value):
+        return False
+
     if isinstance(value, (datetime, date)):
         return True
 
     s = str(value).strip()
-    if not s:
-        return False
-
     for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y"):
         try:
             datetime.strptime(s, fmt)
             return True
         except ValueError:
             continue
-
     return False
 
-def validate_row(row):
-    errors = {}
 
-    # --- DataAngajare ---
-    val = row.get("DataAngajare")
+def validate_row(row: Any) -> dict[str, str]:
+    """
+    Only Nume & Prenume are required.
+    Optional fields:
+      - empty -> OK
+      - filled -> validated
+    """
+    errors: dict[str, str] = {}
 
-    # e gol?
-    try:
-        is_empty = pd.isna(val) or str(val).strip() == ""
-    except Exception:
-        is_empty = str(val).strip() == ""
+    # Required fields
+    for col in REQUIRED_EXCEL_COLUMNS:
+        val = row.get(col) if hasattr(row, "get") else None
+        if not validate_required(val):
+            errors[col] = "Lipsă"
 
-    if not is_empty:
-        # completat -> trebuie să fie valid
-        if not _parse_date_strict(val):
-            errors["DataAngajare"] = (
-                "Dată invalidă (format acceptat: YYYY-MM-DD sau DD.MM.YYYY)"
-            )
-    else:
-        # gol -> eroare doar dacă e obligatoriu
-        if "DataAngajare" in REQUIRED_COLUMNS:
-            errors["DataAngajare"] = "Lipsă (obligatoriu)"
+    # Optional: DataAngajare (validate only if filled)
+    if hasattr(row, "index") and "DataAngajare" in row.index:
+        val = row.get("DataAngajare")
+        if not _is_empty(val) and not _parse_date_strict(val):
+            errors["DataAngajare"] = "Dată invalidă (YYYY-MM-DD, DD.MM.YYYY sau DD/MM/YYYY)"
 
-    if not validate_required(row["Nume"]):
-        errors["Nume"] = "Lipsă"
+    # Optional: CNP
+    if hasattr(row, "index") and "CNP" in row.index:
+        val = row.get("CNP")
+        if not _is_empty(val) and not validate_cnp(val):
+            errors["CNP"] = "CNP invalid"
 
-    if not validate_required(row["Prenume"]):
-        errors["Prenume"] = "Lipsă"
+    # Optional: IBAN
+    if hasattr(row, "index") and "IBAN" in row.index:
+        val = row.get("IBAN")
+        if not _is_empty(val) and not validate_iban(val):
+            errors["IBAN"] = "IBAN invalid"
 
-    if not validate_cnp(row["CNP"]):
-        errors["CNP"] = "CNP invalid"
-
-    if not validate_iban(row["IBAN"]):
-        errors["IBAN"] = "IBAN invalid"
-
-    if not validate_email(row["Email"]):
-        errors["Email"] = "Email invalid"
+    # Optional: Email
+    if hasattr(row, "index") and "Email" in row.index:
+        val = row.get("Email")
+        if not _is_empty(val) and not validate_email(val):
+            errors["Email"] = "Email invalid"
 
     return errors

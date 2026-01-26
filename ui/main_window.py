@@ -2,7 +2,7 @@
 from __future__ import annotations
 from core.error_exporter import export_errors_to_xlsx, default_errors_filename
 from pathlib import Path
-from core.document_generator import row_to_context, generate_docx_for_employee
+from core.document_generator import build_context_with_missing, generate_docx_for_employee, load_company_context
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog
 )
@@ -10,7 +10,6 @@ from core.paths import resource_path
 from core.pdf_converter import docx_to_pdf
 from core.excel_loader import load_and_validate_excel
 from core.version import APP_NAME, APP_VERSION
-from core.document_generator import build_context_with_missing, generate_docx_for_employee
 from ui.template_fields_dialog import TemplateFieldsDialog
 from core.version import APP_NAME, APP_VERSION, APP_COPYRIGHT
 from core.document_generator import load_company_context
@@ -465,14 +464,14 @@ class MainWindow(QMainWindow):
                     candidate = out_path / f"{base}_{last4}.docx"
 
                 # dacă și așa există, pune sufix incremental
-                k = 2
+                k = 1
                 while candidate.exists():
                     candidate = out_path / f"{base}_dup{k}.docx"
                     k += 1
 
             filename = candidate.name
 
-            generate_docx_for_employee(
+            saved = generate_docx_for_employee(
                 template_path=template_path,
                 output_dir=out_dir,
                 context=ctx,
@@ -480,7 +479,7 @@ class MainWindow(QMainWindow):
             )
 
             generated += 1
-            generated_files.append(candidate)
+            generated_files.append(saved)
 
         # salvează pentru PDF (respectă batch-ul curent)
         self._last_generated_docx_dir = out_dir

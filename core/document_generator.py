@@ -1,42 +1,26 @@
 # core/document_generator.py
 from __future__ import annotations
-import re
-from docx import Document
+
 import json
+import re
 from pathlib import Path
 from typing import Any, Tuple
+
 import pandas as pd
+from docx import Document
 from docxtpl import DocxTemplate
-from core.template_mapping import TEMPLATE_FIELD_MAPPING, REQUIRED_TEMPLATE_FIELDS
 
-FALLBACK_VALUE = "—"
+from core.constants import FALLBACK_VALUE as _FALLBACK_VALUE
+from core.paths import resource_path
 
-def row_to_context(row):
-    context = {}
+# Backwards-compat (UI/tests)
+FALLBACK_VALUE = _FALLBACK_VALUE
 
-    for template_field, source in TEMPLATE_FIELD_MAPPING.items():
-        try:
-            if callable(source):
-                raw_value = source(row)
-            else:
-                raw_value = row.get(source)
-        except Exception:
-            raw_value = None
-
-        context[template_field] = normalize_value(raw_value)
-
-    return context
 
 def extract_placeholders_from_docx(docx_path: str | Path) -> set[str]:
-    """
-    Extrage placeholder-ele de forma {{Field}} din paragrafe + tabele.
-    (Suficient pentru template-uri simple; dacă ai cazuri speciale, facem variantă XML.)
-    """
+    """Extract {{Placeholders}} from a DOCX (paragraphs + tables)."""
     doc = Document(str(docx_path))
-    chunks: list[str] = []
-
-    for p in doc.paragraphs:
-        chunks.append(p.text)
+    chunks: list[str] = [p.text for p in doc.paragraphs]
 
     for t in doc.tables:
         for row in t.rows:
@@ -49,6 +33,7 @@ def extract_placeholders_from_docx(docx_path: str | Path) -> set[str]:
 
 
 def normalize_value(v: Any) -> str:
+    """None/NA/empty -> FALLBACK_VALUE, else -> stripped string."""
     try:
         if pd.isna(v):
             return FALLBACK_VALUE
@@ -58,62 +43,88 @@ def normalize_value(v: Any) -> str:
     s = str(v).strip()
     return s if s else FALLBACK_VALUE
 
-def generate_docx_for_employee(
-    template_path: str | Path,
-    output_dir: str | Path,
-    context: dict[str, Any],
-    filename: str
-) -> Path:
-    template_path = Path(template_path)
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1) completează context pentru orice placeholder din docx care lipsește
-    try:
-        placeholders = extract_placeholders_from_docx(template_path)
-        for key in placeholders:
-            if key not in context:
-                context[key] = FALLBACK_VALUE
-    except Exception:
-        # dacă nu putem citi docx-ul, continuăm cu contextul existent
-        pass
-
-    # 2) render + save
-    doc = DocxTemplate(str(template_path))
-    doc.render(context)
-
-    out_path = output_dir / filename
-    doc.save(str(out_path))
-    return out_path
-
 
 def load_company_context() -> dict[str, Any]:
-    path = Path("config/company.json")
+    """Load optional company fields from config/company.json (works in PyInstaller too)."""
+    path = resource_path("config/company.json")
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
 
 def build_context_with_missing(row: Any) -> Tuple[dict[str, Any], list[str], list[str]]:
     """
-    Context = toate coloanele din Excel + cheile din company.json.
-    Fără required/optional pe template: totul e "optional", iar golurile devin "—".
+    Context = all Excel columns (dynamic) + company.json keys.
+    No required/optional template concept.
+
+    Returns:
+      context: dict for docxtpl
+      missing_required: always []
+      missing_optional: keys that became FALLBACK_VALUE (informational only)
     """
     context: dict[str, Any] = {}
 
-    # 1) toate coloanele din Excel (dinamic)
+    # 1) all Excel columns
     for col in getattr(row, "index", []):
         key = str(col).strip()
         if not key:
             continue
-        context[key] = normalize_value(row.get(col))
+        try:
+            context[key] = normalize_value(row.get(col))
+        except Exception:
+            context[key] = FALLBACK_VALUE
 
-    # 2) company/static fields
-    company_ctx = load_company_context()
-    for k, v in company_ctx.items():
-        context[k] = normalize_value(v)
+    # 2) company/static fields (optional)
+    for k, v in load_company_context().items():
+        key = str(k).strip()
+        if not key:
+            continue
+        context[key] = normalize_value(v)
 
-    # 3) missing lists (doar informativ)
     missing_required: list[str] = []
     missing_optional: list[str] = sorted([k for k, v in context.items() if v == FALLBACK_VALUE], key=str.lower)
 
     return context, missing_required, missing_optional
+
+
+def generate_docx_for_employee(
+    template_path: str | Path,
+    output_dir: str | Path,
+    context: dict[str, Any],
+    filename: str,
+) -> Path:
+    """
+    Render DOCX template safely:
+    - merges company.json automatically (caller context wins)
+    - unknown placeholders -> FALLBACK_VALUE
+    - empty values -> FALLBACK_VALUE
+    """
+    template_path = Path(template_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Merge company.json + context (context overrides)
+    merged: dict[str, Any] = {}
+    for k, v in load_company_context().items():
+        merged[str(k).strip()] = normalize_value(v)
+    for k, v in (context or {}).items():
+        merged[str(k).strip()] = normalize_value(v)
+
+    # Fill any placeholders missing in context
+    try:
+        placeholders = extract_placeholders_from_docx(template_path)
+        for key in placeholders:
+            if key not in merged:
+                merged[key] = FALLBACK_VALUE
+    except Exception:
+        pass
+
+    doc = DocxTemplate(str(template_path))
+    doc.render(merged)
+
+    out_path = output_dir / filename
+    doc.save(str(out_path))
+    return out_path
