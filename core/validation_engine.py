@@ -1,11 +1,9 @@
 # core/validation_engine.py
 from __future__ import annotations
-
 from datetime import date, datetime
+import re
 from typing import Any
-
 import pandas as pd
-
 from core.constants import REQUIRED_EXCEL_COLUMNS
 from core.validators import validate_cnp, validate_email, validate_iban, validate_required
 
@@ -20,6 +18,41 @@ def _is_empty(value: Any) -> bool:
         pass
     return str(value).strip() == ""
 
+def _parse_salary(val: Any) -> float | None:
+    """
+    Acceptă:
+      - număr (int/float)
+      - string: "5000", "5.000", "5,000", "5000.50", "5000,50"
+    Returnează float sau None dacă e invalid.
+    """
+    if val is None:
+        return None
+
+    s = str(val).strip()
+    if not s or s.lower() in ("nan", "<na>", "none"):
+        return None
+
+    # elimină spații
+    s = s.replace(" ", "")
+
+    # tratează separatori mii și zecimale:
+    # - dacă are și '.' și ',' -> presupunem '.' mii, ',' zecimal (RO)
+    if "." in s and "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        # dacă are doar ',' -> zecimal RO
+        if "," in s and "." not in s:
+            s = s.replace(",", ".")
+        # dacă are doar '.' -> zecimal EN (ok)
+
+        # caz "5.000" (mii) fără zecimale: dacă pattern de mii, scoate '.'
+        if re.fullmatch(r"\d{1,3}(\.\d{3})+", s):
+            s = s.replace(".", "")
+
+    try:
+        return float(s)
+    except Exception:
+        return None
 
 def _parse_date_strict(value: Any) -> bool:
     """
@@ -42,7 +75,6 @@ def _parse_date_strict(value: Any) -> bool:
         except ValueError:
             continue
     return False
-
 
 def validate_row(row: Any) -> dict[str, str]:
     """
@@ -82,5 +114,13 @@ def validate_row(row: Any) -> dict[str, str]:
         val = row.get("Email")
         if not _is_empty(val) and not validate_email(val):
             errors["Email"] = "Email invalid"
+
+    # --- Salariu mandatory ---
+    salary_raw = row.get("Salariu", None)
+    salary = _parse_salary(salary_raw)
+    if salary is None:
+        errors["Salariu"] = "Salariu lipsă sau invalid (trebuie număr)."
+    elif salary <= 0:
+        errors["Salariu"] = "Salariu invalid (trebuie > 0)."
 
     return errors

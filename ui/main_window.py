@@ -104,6 +104,12 @@ class MainWindow(QMainWindow):
         self.btn_select_valid.setEnabled(False)
         self.btn_select_valid.clicked.connect(self.on_select_valid_only)
 
+        self.btn_select_filtered = QPushButton("Selectează filtrate")
+        self.btn_select_filtered.setEnabled(False)
+        self.btn_select_filtered.clicked.connect(self.on_select_filtered)
+
+        tb.addWidget(self.btn_select_filtered)
+
         self.btn_select_none = QPushButton("Deselectează tot")
         self.btn_select_none.setEnabled(False)
         self.btn_select_none.clicked.connect(self.on_select_none)
@@ -122,8 +128,8 @@ class MainWindow(QMainWindow):
         search_row = QHBoxLayout()
         lbl = QLabel("Caută:")
         self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("Nume / Prenume (ex: Popescu, Ion)")
-        self.txt_search.textChanged.connect(self.on_search_people)
+        self.txt_search.setPlaceholderText("Caută: nume/prenume sau ex: salariu>5000, salariu=4500, salariu 5000-7000")
+        self.txt_search.textChanged.connect(self.apply_search_filter)
 
         self.btn_clear_search = QPushButton("X")
         self.btn_clear_search.setFixedWidth(28)
@@ -240,6 +246,10 @@ class MainWindow(QMainWindow):
         # Umple tabelul de angajați (tab Angajați) + evidențiere invalid
         self._populate_people_table()
 
+        # re-aplică filtrul curent după repopulare
+        if hasattr(self, "search_input"):
+            self.apply_search_filter(self.search_input.text())
+
         self.lbl_status.setText(
             f"Status: Import OK | Rânduri: {len(df)} | Erori: {len(errors)} | Fișier: {path}"
         )
@@ -314,6 +324,8 @@ class MainWindow(QMainWindow):
             self.btn_select_none.setEnabled(True)
         if hasattr(self, "btn_select_valid"):
             self.btn_select_valid.setEnabled(True)
+        if hasattr(self, "btn_select_filtered"):
+            self.btn_select_filtered.setEnabled(True)
 
     def on_export_errors(self) -> None:
         if not self._last_errors:
@@ -652,6 +664,161 @@ class MainWindow(QMainWindow):
 
             match = (q in nume) or (q in prenume) or (q in full) if q else True
             self.table_people.setRowHidden(r, not match)
+
+    def _parse_salary_filter(self, text: str):
+        """
+        Acceptă în search:
+          salariu>5000
+          salariu>= 5000
+          salariu=5000
+          salariu<=4500
+          salariu< 3000
+        Returnează tuple (op, value) sau None.
+        """
+        t = (text or "").strip().lower().replace(" ", "")
+        m = re.search(r"(salariu)(<=|>=|=|<|>)(-?\d+(?:[.,]\d+)?)", t)
+        if not m:
+            return None
+        op = m.group(2)
+        val_s = m.group(3).replace(",", ".")
+        try:
+            val = float(val_s)
+        except Exception:
+            return None
+        return op, val
+
+    def _cell_salary_to_float(self, row_index: int) -> float | None:
+        """
+        Ia salariul din tabel (coloana 'Salariu' dacă o ai în people table),
+        sau din df dacă nu e afișat în tabel.
+        Recomand: dacă nu ai coloană Salariu în tabel, citește din self._last_df.
+        """
+        # VARIANTA 1: dacă ai coloană Salariu în table_people
+        # col_salary = ... (index)
+        # item = self.table_people.item(row_index, col_salary)
+        # s = item.text() if item else ""
+        # ...
+
+        # VARIANTA 2 (mai robust): din df
+        if self._last_df is None:
+            return None
+        try:
+            salary_raw = self._last_df.iloc[row_index].get("Salariu", None)
+        except Exception:
+            return None
+
+        # folosește aceeași logică ca în validare (simplificat)
+        if salary_raw is None:
+            return None
+        s = str(salary_raw).strip().replace(" ", "")
+        if not s or s.lower() in ("nan", "<na>", "none"):
+            return None
+        if "." in s and "," in s:
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            if "," in s and "." not in s:
+                s = s.replace(",", ".")
+            if re.fullmatch(r"\d{1,3}(\.\d{3})+", s):
+                s = s.replace(".", "")
+        try:
+            return float(s)
+        except Exception:
+            return None
+
+    def _match_salary(self, actual: float | None, flt) -> bool:
+        if flt is None:
+            return True
+        if actual is None:
+            return False
+        op, val = flt
+        if op == ">":
+            return actual > val
+        if op == ">=":
+            return actual >= val
+        if op == "<":
+            return actual < val
+        if op == "<=":
+            return actual <= val
+        return actual == val
+
+    def apply_search_filter(self, text: str) -> None:
+        q = (text or "").strip().lower()
+
+        # detect salariu filter
+        salary_filter = self._parse_salary_filter(q)
+        salary_range = self._parse_salary_range(q)
+
+        # scoate partea de salariu din text ca să rămână doar nume/prenume
+        name_query = re.sub(r"(salariu)\s*(<=|>=|=|<|>)\s*(-?\d+(?:[.,]\d+)?)", "", q).strip()
+        name_query = re.sub(r"salariu\s*[: ]\s*(\d+(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)", "", name_query).strip()
+
+        for r in range(self.table_people.rowCount()):
+            nume = (self.table_people.item(r, 2).text() if self.table_people.item(r, 2) else "").lower()
+            prenume = (self.table_people.item(r, 3).text() if self.table_people.item(r, 3) else "").lower()
+
+            ok_name = True
+            if name_query:
+                full = f"{nume} {prenume}".strip()
+                ok_name = (name_query in nume) or (name_query in prenume) or (name_query in full)
+
+            sal = self._cell_salary_to_float(r)
+
+            ok_salary = True
+            if salary_filter is not None:
+                ok_salary = self._match_salary(sal, salary_filter)
+            elif salary_range is not None:
+                if sal is None:
+                    ok_salary = False
+                else:
+                    lo, hi = salary_range
+                    ok_salary = (lo <= sal <= hi)
+
+            self.table_people.setRowHidden(r, not (ok_name and ok_salary))
+
+        if hasattr(self, "_update_counter"):
+            self._update_counter()
+
+    def _parse_salary_range(self, text: str):
+        """
+        Acceptă:
+          salariu 5000-7000
+          salariu:5000-7000
+          5000-7000 (dacă vrei, dar eu îl leg de cuvântul 'salariu' ca să nu fie ambiguu)
+        """
+        t = (text or "").strip().lower()
+        # permite spații, ':' etc
+        m = re.search(r"salariu\s*[: ]\s*(\d+(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)", t)
+        if not m:
+            return None
+        a = float(m.group(1).replace(",", "."))
+        b = float(m.group(2).replace(",", "."))
+        lo, hi = (a, b) if a <= b else (b, a)
+        return (lo, hi)
+
+    def on_select_filtered(self) -> None:
+        """
+        Bifează pentru export doar rândurile:
+          - vizibile (după filtrare)
+          - valide (checkbox activ / user-checkable)
+        """
+        for r in range(self.table_people.rowCount()):
+            if self.table_people.isRowHidden(r):
+                continue
+
+            chk = self.table_people.item(r, 0)
+            if not chk:
+                continue
+
+            # Bifează doar dacă e valid (are flag de checkable)
+            if chk.flags() & Qt.ItemIsUserCheckable:
+                chk.setCheckState(Qt.Checked)
+
+        # dacă ai contor, îl actualizezi
+        if hasattr(self, "_update_counter"):
+            self._update_counter()
+
+
+
 
 
 
