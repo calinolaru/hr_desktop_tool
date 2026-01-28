@@ -2,6 +2,6 @@
 from __future__ import annotations
 
 PUBLIC_KEY_PEM = b"""-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEA30YNTjaLCzoDikvEgo9RhEQ8NolcPwPQWCeuNqkmDpg=
+MCowBQYDK2VwAyEAnNjXfGVIGQvlYENxAAf6gghYHWPn3nJI3ZuK0rruJfc=
 -----END PUBLIC KEY-----
 """
