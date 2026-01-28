@@ -2,14 +2,13 @@
 from __future__ import annotations
 from core.error_exporter import export_errors_to_xlsx, default_errors_filename
 from pathlib import Path
-from core.document_generator import build_context_with_missing, generate_docx_for_employee, load_company_context
+from core.document_generator import build_context_with_missing, generate_docx_for_employee
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog
 )
 from core.paths import resource_path
 from core.pdf_converter import docx_to_pdf
 from core.excel_loader import load_and_validate_excel
-from core.version import APP_NAME, APP_VERSION
 from ui.template_fields_dialog import TemplateFieldsDialog
 from core.version import APP_NAME, APP_VERSION, APP_COPYRIGHT
 from core.document_generator import load_company_context
@@ -17,12 +16,13 @@ from PySide6.QtWidgets import QLineEdit, QHBoxLayout
 import re
 from PySide6.QtWidgets import (
     QVBoxLayout, QTableWidget, QTableWidgetItem,
-    QHeaderView, QTabWidget, QMessageBox, QToolBar
+    QHeaderView, QTabWidget, QToolBar
 )
 from ui.license_info_dialog import LicenseInfoDialog
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QWidget, QSizePolicy, QLabel, QPushButton
+from PySide6.QtWidgets import QMessageBox
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -587,15 +587,88 @@ class MainWindow(QMainWindow):
 
         lic = getattr(self, "_license_info", None)
 
+        # --- helper formatări ---
+        def short_date(iso: str) -> str:
+            # ISO: 2026-02-02T19:59:31.359934+00:00  ->  2026-02-02
+            try:
+                return iso.split("T", 1)[0]
+            except Exception:
+                return iso
+
+        def status_text(lic) -> str:
+            expires = getattr(lic, "expires", None)
+            if not expires:
+                return "Nelimitată"
+
+            try:
+                from core.license_manager import days_until_expiry
+                days_left = days_until_expiry(lic)
+            except Exception:
+                days_left = None
+
+            if days_left is None:
+                return f"Expiră la {short_date(str(expires))}"
+
+            if days_left <= 0:
+                return "Expirată"
+            if days_left == 1:
+                return "Expiră mâine"
+            return f"{days_left} zile rămase"
+
+        # --- construim HTML minimalist ---
+        title = f"<div style='font-size:16px; font-weight:600;'>{APP_NAME}</div>"
+        ver = f"<div style='color:#B8BDC7;'>Versiune: {APP_VERSION}</div>"
+        copy = f"<div style='color:#B8BDC7;'>{APP_COPYRIGHT}</div>"
+
         if lic:
-            dlg = LicenseInfoDialog(lic, parent=self)
-            dlg.exec()
+            lic_type = str(getattr(lic, "license_type", "")).upper()
+            company = str(getattr(lic, "company", "")).strip() or "—"
+            vat = str(getattr(lic, "vat", "")).strip() or "—"
+            machine = str(getattr(lic, "machine", "")).strip()
+            machine_short = (machine[:8] + "…" + machine[-6:]) if len(machine) > 16 else (machine or "—")
+
+            issued = str(getattr(lic, "issued_at", "")).strip()
+            expires = getattr(lic, "expires", None)
+
+            issued_short = short_date(issued) if issued else "—"
+            expires_short = short_date(str(expires)) if expires else "—"
+
+            status = status_text(lic)
+
+            license_block = f"""
+            <div style="margin-top:12px; padding-top:10px; border-top:1px solid rgba(255,255,255,0.10);">
+              <div style="font-weight:600; margin-bottom:6px;">Licență</div>
+              <table style="width:100%; border-collapse:collapse;">
+                <tr><td style="padding:2px 10px 2px 0; color:#B8BDC7;">Tip</td><td>{lic_type}</td></tr>
+                <tr><td style="padding:2px 10px 2px 0; color:#B8BDC7;">Companie</td><td>{company}</td></tr>
+                <tr><td style="padding:2px 10px 2px 0; color:#B8BDC7;">CUI/VAT</td><td>{vat}</td></tr>
+                <tr><td style="padding:2px 10px 2px 0; color:#B8BDC7;">Machine</td><td>{machine_short}</td></tr>
+                <tr><td style="padding:2px 10px 2px 0; color:#B8BDC7;">Emisă</td><td>{issued_short}</td></tr>
+                <tr><td style="padding:2px 10px 2px 0; color:#B8BDC7;">Expiră</td><td>{expires_short}</td></tr>
+                <tr><td style="padding:2px 10px 2px 0; color:#B8BDC7;">Status</td><td><b>{status}</b></td></tr>
+              </table>
+              <div style="margin-top:8px; color:#B8BDC7; font-size:11px;">
+                Pentru suport, trimite Machine ID complet (din fișierul <b>machine_id.txt</b>)
+              </div>
+            </div>
+            """
         else:
-            QMessageBox.information(
-                self,
-                "About",
-                f"{APP_NAME}\nVersion: {APP_VERSION}\n{APP_COPYRIGHT}"
-            )
+            license_block = """
+            <div style="margin-top:12px; padding-top:10px; border-top:1px solid rgba(255,255,255,0.10); color:#B8BDC7;">
+              Licență: — (neîncărcată)
+            </div>
+            """
+
+        html = f"""
+        <div style="min-width:520px;">
+          {title}
+          {ver}
+          {copy}
+          {license_block}
+        </div>
+        """
+
+        QMessageBox.information(self, "About", html)
 
     def on_show_template_fields(self) -> None:
         if self._last_df is None:

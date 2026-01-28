@@ -120,3 +120,12 @@ def load_and_validate_license() -> LicenseInfo:
         issued_at=str(data["issued_at"]).strip(),
         expires=str(expires).strip() if expires else None,
     )
+
+def days_until_expiry(lic: LicenseInfo) -> int | None:
+    if not lic.expires:
+        return None
+
+    exp = _parse_iso(lic.expires)
+    now = _utc_now()
+    delta = exp - now
+    return max(0, delta.days)
