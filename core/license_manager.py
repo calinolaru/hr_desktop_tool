@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from core.trial_guard import enforce_no_time_rollback
 from core.license_crypto import b64decode_json, verify_signature
 from core.machine_fingerprint import get_machine_fingerprint
 
@@ -102,15 +103,26 @@ def load_and_validate_license() -> LicenseInfo:
             "Trimite acest Machine ID furnizorului pentru o licență compatibilă."
         )
 
-    # --- expiry (trial only) ---
+    # --- expiry (doar dacă există expirare) ---
     expires = data.get("expires")
+
     if expires:
+        # anti time-rollback (doar pentru trial / abonament)
+        try:
+            enforce_no_time_rollback()
+        except TimeRollbackError as e:
+            raise LicenseError(str(e))
+
         try:
             exp_dt = _parse_iso(str(expires))
         except Exception:
             raise LicenseError("Licență invalidă (expires nu este ISO datetime).")
+
         if _utc_now() > exp_dt:
-            raise LicenseError("Licența Trial a expirat. Contactează furnizorul pentru activare.")
+            raise LicenseError(
+                "Licența a expirat.\n\n"
+                "Contactează furnizorul pentru activare."
+            )
 
     return LicenseInfo(
         license_type=lic_type,
