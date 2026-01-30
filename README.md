@@ -1,72 +1,147 @@
 # HR Desktop Tool
 
-Aplicație desktop pentru generarea automată de documente HR (DOCX / PDF) pe baza unui fișier Excel (.xlsx).
-Scopul aplicației este eliminarea muncii repetitive (copy–paste) și reducerea erorilor umane în documentele HR.
+Aplicație desktop Windows pentru generarea automată de documente HR (DOCX / PDF)
+din fișiere Excel, cu licențiere offline, PC-bound și protecție anti-abuz.
 
 ---
 
-## Funcționalități principale
+## ✨ Funcționalități
 
-- Import fișier Excel (.xlsx)
-- Validare date (ex: CNP, IBAN, Email)
-- Raport de erori exportabil în Excel
-- Listă angajați cu selecție individuală pentru export
-- Evidențiere vizuală a rândurilor invalide
-- Căutare rapidă după Nume / Prenume
-- Generare documente DOCX din template Word
+- Import fișier Excel (`.xlsx`)
+- Citire dinamică a coloanelor (prima linie din Excel)
+- Validare date:
+  - email
+  - CNP
+  - salariu (**mandatory**)
+- Căutare și filtrare:
+  - Nume / Prenume
+  - Salariu:
+    - `>5000`
+    - `<4000`
+    - `=6000`
+    - interval: `5000-7000`
+- Selectare rânduri:
+  - selectează valide
+  - selectează rândurile filtrate
+  - deselectează tot
+- Generare documente:
+  - Contracte
+  - Acte adiționale
+  - Orice template DOCX personalizat
 - Conversie DOCX → PDF
-- Suport pentru câmpuri dinamice (coloane Excel)
-- Fallback automat pentru câmpuri lipsă (`—`)
-- Suport pentru mai multe tipuri de documente (contract, act adițional etc.)
+- Licențiere offline:
+  - Trial (cu expirare)
+  - Full / Lifetime
+  - PC binding (Machine ID)
+  - Protecție anti „dat ceasul înapoi”
 
 ---
 
-## Conceptul de date
+## 📊 Fișier Excel (input)
 
-### Excel = sursa principală de date
-
-- Prima linie din Excel este header-ul
-- Fiecare coloană devine automat un câmp utilizabil în template-ul Word
-- Nu este necesară configurare suplimentară
-
-### Coloane obligatorii
-
-Fișierul Excel trebuie să conțină obligatoriu:
-
-- `Nume`
-- `Prenume`
-
-Acestea sunt folosite pentru:
-- identificarea angajaților
-- căutare rapidă
-- generarea numelui fișierelor
-
-Toate celelalte coloane sunt opționale.
+- Coloanele sunt citite **dinamic** din prima linie
+- **Mandatory**:
+  - `Nume`
+  - `Prenume`
+  - `Salariu`
+- Restul coloanelor sunt **opționale**
+- Celulele goale sunt înlocuite automat cu `—` în documente
 
 ---
 
-## Template DOCX
+## 📄 Template DOCX
 
-- Template-urile sunt fișiere Word standard (.docx)
-- Câmpurile se scriu sub forma:
+- Placeholder-ele din Word trebuie să coincidă **exact** cu numele coloanelor din Excel:
 
+```
 {{Nume}}
 {{Prenume}}
+{{Salariu}}
 {{Functie}}
-{{OriceAltaColoana}}
+```
 
-### Reguli importante
-
-- Dacă o coloană există în Excel → valoarea este înlocuită
-- Dacă o coloană este goală → se folosește fallback `—`
-- Dacă un câmp din template NU există în Excel → se folosește fallback `—`
-- Documentul se generează fără erori în toate cazurile
+- Coloană existentă în Excel dar nefolosită → OK  
+- Placeholder inexistent în Excel → înlocuit cu `—`  
+- Documentul se generează fără erori
 
 ---
 
-## Instalare (Developer / local)
-
-### 1. Creează virtual environment
+## 🖥️ Build executabil (.exe)
 
 ```bash
-python -m venv .venv
+pip install -r requirements.txt
+pip install pyinstaller
+
+pyinstaller --noconsole --name HRTool ^
+  --add-data "templates;templates" ^
+  --add-data "ui;ui" ^
+  --add-data "core;core" ^
+  app.py
+```
+
+Executabilul apare în `dist/HRTool/HRTool.exe`.
+
+---
+
+## 🔐 Licențiere
+
+### Tipuri
+- `trial` – cu expirare
+- `full` – pe viață (per PC)
+
+### Caracteristici
+- Offline
+- Legată de PC (Machine ID)
+- Semnătură criptografică
+- Anti rollback dată sistem
+
+---
+
+## 🆔 Machine ID
+
+La lipsă licență, aplicația generează automat:
+```
+machine_id.txt
+```
+Clientul trimite acest fișier furnizorului.
+
+---
+
+## 🧾 Generare licență (furnizor)
+
+```bash
+python tools/gen_license.py ^
+  --type trial ^
+  --company "ACME SRL" ^
+  --vat "RO12345678" ^
+  --machine "<MACHINE_ID>" ^
+  --days 7
+```
+
+Rezultat: `license.json`
+
+---
+
+## 📂 Unde se pune licența (client)
+
+```
+HRTool/
+├─ HRTool.exe
+└─ config/
+   └─ license.json
+```
+
+---
+
+## ℹ️ About
+
+Afișează:
+- Tip licență
+- Companie
+- CUI
+- Data expirării (fără oră)
+- Zile rămase
+
+---
+
+© HR Desktop Tool – toate drepturile rezervate.
