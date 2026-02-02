@@ -8,10 +8,13 @@ from core.license_manager import load_and_validate_license, LicenseError
 from core.machine_fingerprint import get_machine_fingerprint
 from core.license_manager import days_until_expiry
 from ui.style import APP_QSS
+from PySide6.QtWidgets import QApplication, QMessageBox, QStyleFactory
+
 
 
 def main() -> None:
     app = QApplication(sys.argv)
+    app.setStyle(QStyleFactory.create("Fusion"))
     app.setStyleSheet(APP_QSS)
 
     try:
