@@ -1,63 +1,48 @@
 # core/excel_loader.py
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Tuple
-
 import pandas as pd
-
-from core.constants import REQUIRED_EXCEL_COLUMNS
-from core.validation_engine import validate_row
+from openpyxl import load_workbook
 
 
-def load_and_validate_excel(path: str | Path) -> Tuple[pd.DataFrame, list[dict[str, Any]]]:
+def _read_header_styles(path: str) -> tuple[list[str], set[str]]:
     """
-    Load Excel + validate rows.
-
-    Rules:
-    - Header row defines what fields exist for templates.
-    - Only 'Nume' and 'Prenume' are required.
-    - All other columns are optional; if filled, we validate format for some known fields.
+    Returnează:
+      - headers (text header)
+      - mandatory_headers (headers care sunt bold în Excel)
     """
-    path = Path(path)
+    wb = load_workbook(path, read_only=False, data_only=True)
+    ws = wb.active
+
+    headers: list[str] = []
+    mandatory_headers: set[str] = set()
+
+    # Header row = 1
+    for cell in ws[1]:
+        header = str(cell.value).strip() if cell.value is not None else ""
+        headers.append(header)
+
+        try:
+            if cell.font and cell.font.bold and header:
+                mandatory_headers.add(header)
+        except Exception:
+            pass
+
+    return headers, mandatory_headers
+
+
+def load_and_validate_excel(path: str):
+    """
+    Citește Excel și întoarce:
+      df, headers, mandatory_headers(bold)
+    """
+    headers, mandatory_headers = _read_header_styles(path)
+
     df = pd.read_excel(path)
+    df.columns = [str(c).strip() for c in df.columns]
 
-    missing = [c for c in REQUIRED_EXCEL_COLUMNS if c not in df.columns]
-    if missing:
-        raise ValueError(f"Lipsesc coloane obligatorii: {missing}")
+    # headers din pandas pot fi identice dar cu spații — normalizăm la ce are df
+    headers = list(df.columns)
+    mandatory_headers = {h for h in mandatory_headers if h in df.columns}
 
-    # Normalize required columns for UI/search/filenames
-    for col in REQUIRED_EXCEL_COLUMNS:
-        df[col] = df[col].astype("string").fillna("").str.strip()
-
-    # Normalize common optional fields (only if present)
-    if "CNP" in df.columns:
-        df["CNP"] = (
-            df["CNP"]
-            .astype("string")
-            .fillna("")
-            .str.strip()
-            .str.replace(" ", "", regex=False)
-            .str.replace(r"\.0$", "", regex=True)
-        )
-
-    if "IBAN" in df.columns:
-        df["IBAN"] = (
-            df["IBAN"]
-            .astype("string")
-            .fillna("")
-            .str.strip()
-            .str.replace(" ", "", regex=False)
-        )
-
-    if "Email" in df.columns:
-        df["Email"] = df["Email"].astype("string").fillna("").str.strip()
-
-    all_errors: list[dict[str, Any]] = []
-    for index, row in df.iterrows():
-        errors = validate_row(row)
-        if errors:
-            all_errors.append({"row": index + 2, "errors": errors})  # header=1, first data row=2
-
-    return df, all_errors
-
+    return df, headers, mandatory_headers

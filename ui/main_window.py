@@ -1,55 +1,146 @@
 # ui/main_window.py
 from __future__ import annotations
-from core.error_exporter import export_errors_to_xlsx, default_errors_filename
+
 from pathlib import Path
-from core.document_generator import build_context_with_missing, generate_docx_for_employee
-from PySide6.QtWidgets import (
-    QMainWindow, QFileDialog
-)
-from core.paths import resource_path
-from core.pdf_converter import docx_to_pdf
-from core.excel_loader import load_and_validate_excel
-from ui.template_fields_dialog import TemplateFieldsDialog
-from core.version import APP_NAME, APP_VERSION, APP_COPYRIGHT
-from core.document_generator import load_company_context
-from PySide6.QtWidgets import QLineEdit, QHBoxLayout
+import hashlib
+import json
 import re
-from PySide6.QtWidgets import (
-    QVBoxLayout, QTableWidget, QTableWidgetItem,
-    QHeaderView, QTabWidget, QToolBar
-)
-from ui.license_info_dialog import LicenseInfoDialog
+from typing import Any
+from pathlib import Path
+from PySide6.QtCore import QStandardPaths
+
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QWidget, QSizePolicy, QLabel, QPushButton
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+    QHeaderView, QToolButton, QCheckBox,
+)
+
+from core.paths import resource_path
+from core.version import APP_NAME, APP_VERSION
+from core.excel_loader import load_and_validate_excel
+from core.document_generator import generate_docx_for_employee
+from core.pdf_converter import docx_to_pdf
+from ui.template_fields_dialog import TemplateFieldsDialog
+from ui.checkbox_delegate import CenteredCheckBoxDelegate
+from ui.license_info_dialog import LicenseInfoDialog
+
+_salary_re = re.compile(r"^\s*salariu\s*(>=|<=|=|>|<)\s*([\d\.,]+)\s*$", re.IGNORECASE)
+_salary_range_re = re.compile(r"^\s*salariu\s+([\d\.,]+)\s*-\s*([\d\.,]+)\s*$", re.IGNORECASE)
+
+def _parse_float_ro(s: str):
+    try:
+        x = s.strip().replace(" ", "")
+        # 1.234,56 -> 1234.56
+        if "," in x and "." in x:
+            x = x.replace(".", "").replace(",", ".")
+        else:
+            x = x.replace(",", ".")
+        return float(x)
+    except Exception:
+        return None
+
+
+HARD_MANDATORY_HEADERS = {"Nume", "Prenume", "Salariu"}  # regula aplicației
+
+
+def _safe_placeholder(name: str) -> str:
+    """
+    Transformă numele de coloană Excel într-un placeholder "safe" pentru DOCX:
+      - păstrează litere/cifre/underscore
+      - spații și punctuație -> underscore
+      - nu începe cu cifră
+    """
+    s = (name or "").strip()
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^0-9a-zA-Z_]", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    if not s:
+        s = "Field"
+    if s[0].isdigit():
+        s = f"F_{s}"
+    return s
+
+
+def _parse_float_ro(value: str) -> float | None:
+    """
+    Acceptă:
+      5000
+      5.000
+      5,000
+      5.000,50
+      5000,50
+    """
+    if value is None:
+        return None
+    s = str(value).strip().replace(" ", "")
+    if not s:
+        return None
+
+    # dacă are și '.' și ',' => '.' e separator mii, ',' zecimal
+    if "." in s and "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        # dacă are doar ',' => zecimal
+        if "," in s and "." not in s:
+            s = s.replace(",", ".")
+        # dacă arată ca mii cu '.' (ex: 5.000.000) => scoate punctele
+        if re.fullmatch(r"\d{1,3}(\.\d{3})+", s):
+            s = s.replace(".", "")
+
+    try:
+        return float(s)
+    except Exception:
+        return None
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
 
-        # Window
-        self.resize(900, 600)
+        self.resize(1100, 680)
         self.setWindowTitle(f"{APP_NAME} - v{APP_VERSION}")
 
-        # Root widget
+        # --- State ---
+        self._last_df = None
+        self._last_source_path: str | None = None
+
+        self._excel_headers: list[str] = []
+        self._mandatory_headers: set[str] = set()
+        self._col_map: dict[str, str] = {}            # ExcelHeader -> SafePlaceholder
+        self._safe_to_excel: dict[str, str] = {}      # SafePlaceholder -> ExcelHeader
+        self._mandatory_safe: set[str] = set()        # set of safe placeholders that are mandatory
+
+        self._last_generated_docx_files: list[Path] = []
+        self._last_generated_docx_dir: str | None = None
+        self._last_template_path: str | None = None
+
+        # persist order
+        self._column_order_key: str | None = None
+        self._saved_column_order: list[str] = []
+
+        # --- Root ---
         root = QWidget()
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
 
-        # --- State (single source of truth) ---
-        self._last_missing_optional = set()
-        self._last_missing_required = set()
-        self._last_errors = []
-        self._last_source_path = None
-        self._last_df = None
-        self._last_generated_docx_dir = None
-        self._last_generated_docx_files = []  # list[Path]
-        self._last_template_path = None
-
         # --- Menu ---
         menubar = self.menuBar()
-
         tools_menu = menubar.addMenu("Tools")
         act_fields = tools_menu.addAction("Câmpuri template")
         act_fields.triggered.connect(self.on_show_template_fields)
@@ -58,20 +149,15 @@ class MainWindow(QMainWindow):
         about_action = help_menu.addAction("About")
         about_action.triggered.connect(self.on_about)
 
-        # --- Toolbar (top actions) ---
+        # --- Toolbar ---
         tb = QToolBar("Main")
         tb.setMovable(False)
         tb.setFloatable(False)
         tb.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.addToolBar(tb)
 
-        # Main actions (folosite des)
         self.btn_import = QPushButton("Import Excel (.xlsx)")
         self.btn_import.clicked.connect(self.on_import_excel)
-
-        self.btn_export = QPushButton("Export erori (.xlsx)")
-        self.btn_export.setEnabled(False)
-        self.btn_export.clicked.connect(self.on_export_errors)
 
         self.btn_generate = QPushButton("Generează DOCX (selectate)")
         self.btn_generate.setEnabled(False)
@@ -82,7 +168,6 @@ class MainWindow(QMainWindow):
         self.btn_generate_pdf.clicked.connect(self.on_generate_pdf)
 
         tb.addWidget(self.btn_import)
-        tb.addWidget(self.btn_export)
         tb.addWidget(self.btn_generate)
         tb.addWidget(self.btn_generate_pdf)
 
@@ -92,180 +177,261 @@ class MainWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
 
-        # Counter label (Selectate / Valide)
-        self.lbl_counter = QLabel("Selectate: 0 / Valide: 0")
-        self.lbl_counter.setAlignment(Qt.AlignVCenter)
+        self.lbl_counter = QLabel("Selectate: 0 / Total: 0")
         tb.addWidget(self.lbl_counter)
 
         tb.addSeparator()
 
-        # Selection actions (doar astea 2)
-        self.btn_select_valid = QPushButton("Selectează valide")
-        self.btn_select_valid.setEnabled(False)
-        self.btn_select_valid.clicked.connect(self.on_select_valid_only)
-
         self.btn_select_filtered = QPushButton("Selectează filtrate")
         self.btn_select_filtered.setEnabled(False)
         self.btn_select_filtered.clicked.connect(self.on_select_filtered)
-
         tb.addWidget(self.btn_select_filtered)
+
+        self.btn_select_all = QPushButton("Selectează tot")
+        self.btn_select_all.setEnabled(False)
+        self.btn_select_all.clicked.connect(self.on_select_all)
+        tb.addWidget(self.btn_select_all)
 
         self.btn_select_none = QPushButton("Deselectează tot")
         self.btn_select_none.setEnabled(False)
         self.btn_select_none.clicked.connect(self.on_select_none)
-
-        tb.addWidget(self.btn_select_valid)
         tb.addWidget(self.btn_select_none)
 
         # --- Tabs ---
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
 
-        # --- Tab: Angajați (select export) ---
+        # --- Tab: Angajați ---
         people_tab = QWidget()
         people_layout = QVBoxLayout(people_tab)
 
-        search_row = QHBoxLayout()
+        # --- Search row (wrap) - dropdown coloane + input + clear
+        search_wrap = QWidget()
+        search_wrap.setObjectName("SearchWrap")
+        search_wrap_layout = QHBoxLayout(search_wrap)
+        search_wrap_layout.setContentsMargins(8, 8, 8, 8)
+        search_wrap_layout.setSpacing(8)
+
         lbl = QLabel("Caută:")
-        self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("Caută: nume/prenume sau ex: salariu>5000, salariu=4500, salariu 5000-7000")
-        self.txt_search.textChanged.connect(self.apply_search_filter)
+        search_wrap_layout.addWidget(lbl)
+
+        # Buton "Coloane" (dropdown cu checkbox-uri)
+        self.btn_columns = QToolButton()
+        self.btn_columns.setText("Coloane: (niciuna)")
+        self.btn_columns.setPopupMode(QToolButton.InstantPopup)
+
+        self.columns_menu = QMenu(self)
+        self.btn_columns.setMenu(self.columns_menu)
+        search_wrap_layout.addWidget(self.btn_columns)
+
+        # Input search
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("ex: popescu | salariu>5000 | salariu 5000-7000")
+        self.search_input.textChanged.connect(self.apply_search_filter)
+        search_wrap_layout.addWidget(self.search_input, 1)
 
         self.btn_clear_search = QPushButton("X")
-        self.btn_clear_search.setFixedWidth(28)
-        self.btn_clear_search.clicked.connect(lambda: self.txt_search.setText(""))
+        self.btn_clear_search.setFixedWidth(32)
+        self.btn_clear_search.clicked.connect(lambda: self.search_input.setText(""))
+        search_wrap_layout.addWidget(self.btn_clear_search)
 
-        search_row.addWidget(lbl)
-        search_row.addWidget(self.txt_search, 1)
-        search_row.addWidget(self.btn_clear_search)
+        people_layout.addWidget(search_wrap)
 
-        people_layout.addLayout(search_row)
-
-        self.table_people = QTableWidget(0, 6)
-        self.table_people.setHorizontalHeaderLabels(["Export", "Excel Row", "Nume", "Prenume", "CNP", "Email"])
+        # Table (dinamic)
+        self.table_people = QTableWidget(0, 0)
         self.table_people.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table_people.setSelectionBehavior(QTableWidget.SelectRows)
         self.table_people.setAlternatingRowColors(True)
         self.table_people.setShowGrid(False)
         self.table_people.verticalHeader().setVisible(False)
+        self.table_people.setWordWrap(False)
 
-        hhp = self.table_people.horizontalHeader()
-        hhp.setStretchLastSection(True)
-        hhp.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # checkbox
-        hhp.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # excel row
-        hhp.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        hhp.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        hhp.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        hhp.setSectionResizeMode(5, QHeaderView.Stretch)
+        # scroll (corect PySide6)
+        self.table_people.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table_people.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
 
-        # contor live când bifezi manual
+        # reorder columns
+        hh = self.table_people.horizontalHeader()
+        hh.setSectionsMovable(True)
+        hh.sectionMoved.connect(self._on_header_section_moved)
+
+        # contor live
         self.table_people.itemChanged.connect(self._on_people_item_changed)
 
+        # după setările tabelului
+        self.table_people.setColumnWidth(0, 70)  # un pic mai lat ca să arate bine
+
+        # IMPORTANT: fără edit, doar check
+        self.table_people.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table_people.setColumnWidth(0, 70)
+        self.table_people.setItemDelegateForColumn(0, CenteredCheckBoxDelegate(self.table_people, checkbox_size=14))
+
         people_layout.addWidget(self.table_people, 1)
-        self.tabs.addTab(people_tab, "Angajați")
+        self.tabs.addTab(people_tab, "Tabel Excel")
 
-        # --- Tab: Erori ---
-        errors_tab = QWidget()
-        errors_layout = QVBoxLayout(errors_tab)
-
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Excel Row", "Field", "Message"])
-        self.table.setSortingEnabled(True)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(False)
-        self.table.verticalHeader().setVisible(False)
-
-        hhe = self.table.horizontalHeader()
-        hhe.setStretchLastSection(True)
-        hhe.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hhe.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hhe.setSectionResizeMode(2, QHeaderView.Stretch)
-
-        errors_layout.addWidget(self.table, 1)
-        self.tabs.addTab(errors_tab, "Erori")
-
-        # Status label (optional)
+        # Status label
         self.lbl_status = QLabel("Status: Aștept import Excel…")
         self.lbl_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.lbl_status)
 
-        # Status bar
         self.statusBar().showMessage("Ready")
 
+    # ---------------------------
+    # Helpers
+    # ---------------------------
     def safe_name(self, s: str) -> str:
         s = (s or "").strip()
         for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
             s = s.replace(ch, "-")
-        while "  " in s:
-            s = s.replace("  ", " ")
+        s = re.sub(r"\s+", " ", s).strip()
         return s
 
     def doc_prefix_from_template(self, template_path: str) -> str:
-        name = Path(template_path).stem  # ex: "contract_template"
-        name = re.sub(r"(template|tmpl|model)$", "", name, flags=re.IGNORECASE)
-        name = name.replace("-", "_").replace(" ", "_")
-        name = name.strip("_")
+        name = Path(template_path).stem
+        name = re.sub(r"(template|tmpl|model)$", "", name, flags=re.IGNORECASE).strip("_- ")
+        name = name.replace("-", "_").replace(" ", "_").strip("_")
+        return name.title().replace("__", "_") or "Document"
 
-        # Mapări friendly (opțional)
-        mapping = {
-            "contract": "Contract",
-            "act_aditional": "Act_Aditional",
-            "decizie": "Decizie",
-        }
-        return mapping.get(name.lower(), name.title().replace("__", "_") or "Document")
+    def _make_column_order_key(self, path: str, headers: list[str]) -> str:
+        p = Path(path)
+        base = f"{p.name}|{'|'.join(headers)}"
+        return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
+    def _column_order_store_path(self) -> Path:
+        # lângă exe / în dev: în config
+        from core.license_manager import app_base_dir
+        d = app_base_dir() / "config"
+        d.mkdir(exist_ok=True)
+        return d / "column_order.json"
+
+    def _load_saved_column_order(self, key: str) -> list[str]:
+        store = self._column_order_store_path()
+        if not store.exists():
+            return []
+        try:
+            data = json.loads(store.read_text(encoding="utf-8"))
+            return data.get(key, []) or []
+        except Exception:
+            return []
+
+    def _persist_column_order(self, key: str, order: list[str]) -> None:
+        store = self._column_order_store_path()
+        data: dict[str, Any] = {}
+        if store.exists():
+            try:
+                data = json.loads(store.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        data[key] = order
+        store.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # ---------------------------
+    # Import
+    # ---------------------------
     def on_import_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Selectează fișierul Excel",
-            "",
-            "Excel Files (*.xlsx)"
+            self, "Selectează fișierul Excel", "", "Excel Files (*.xlsx)"
         )
         if not path:
             return
 
         try:
-            df, errors = load_and_validate_excel(path)
+            # IMPORTANT:
+            # load_and_validate_excel trebuie să returneze:
+            #   df, headers, mandatory_headers
+            df, headers, mandatory_headers = load_and_validate_excel(path)
 
             self._last_df = df
-            self._last_errors = errors
+            self._excel_headers = list(headers)
+            self._mandatory_headers = set(mandatory_headers or [])
+
+            # hard mandatory always
+            self._mandatory_headers |= set(HARD_MANDATORY_HEADERS)
+
+            # col map safe
+            self._col_map = {h: _safe_placeholder(h) for h in self._excel_headers}
+            self._safe_to_excel = {v: k for k, v in self._col_map.items()}
+
+            # mandatory safe set
+            self._mandatory_safe = {
+                self._col_map[h] for h in self._mandatory_headers if h in self._col_map
+            }
+
             self._last_source_path = path
 
-            self.btn_export.setEnabled(len(errors) > 0)
+            # persist reorder key
+            self._column_order_key = self._make_column_order_key(path, self._excel_headers)
+            self._saved_column_order = self._load_saved_column_order(self._column_order_key)
+
+            # build table columns + populate
+            self._setup_people_table_columns()
+            self._populate_people_table()
+
+            # rebuild columns dropdown
+            self._rebuild_columns_menu()
+
+            # reset search
+            if hasattr(self, "search_input"):
+                self.search_input.setText("")
+
+            # enable buttons
             self.btn_generate.setEnabled(len(df) > 0)
+            self.btn_generate_pdf.setEnabled(False)
+
+            self.btn_select_all.setEnabled(len(df) > 0)
+            self.btn_select_none.setEnabled(len(df) > 0)
+            self.btn_select_filtered.setEnabled(len(df) > 0)
 
         except Exception as e:
             QMessageBox.critical(self, "Eroare la import", str(e))
             return
 
-        # Umple tabelul de erori (tab Erori)
-        self.populate_errors(errors)
+        self.lbl_status.setText(f"Status: Import OK | Rânduri: {len(df)} | Fișier: {path}")
 
-        # Umple tabelul de angajați (tab Angajați) + evidențiere invalid
-        self._populate_people_table()
+    def _setup_people_table_columns(self) -> None:
+        """
+        Col0: Export (checkbox)
+        Col1: Excel Row
+        Rest: TOATE coloanele Excel (în ordinea salvată dacă există)
+        """
+        headers = list(self._excel_headers)
 
-        # re-aplică filtrul curent după repopulare
-        if hasattr(self, "search_input"):
-            self.apply_search_filter(self.search_input.text())
+        # apply saved order
+        if self._saved_column_order:
+            saved = [h for h in self._saved_column_order if h in headers]
+            remaining = [h for h in headers if h not in saved]
+            headers = saved + remaining
 
-        self.lbl_status.setText(
-            f"Status: Import OK | Rânduri: {len(df)} | Erori: {len(errors)} | Fișier: {path}"
-        )
+        self._excel_headers = headers  # actual display order
+
+        table_headers = ["Export", "Excel Row"] + headers
+        self.table_people.setColumnCount(len(table_headers))
+        self.table_people.setHorizontalHeaderLabels(table_headers)
+
+        hh = self.table_people.horizontalHeader()
+        hh.setStretchLastSection(True)
+        hh.setSectionsMovable(True)
+
+        # sizing
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+
+        # rest: resize-to-contents, last stretch
+        for i in range(2, len(table_headers) - 1):
+            hh.setSectionResizeMode(i, QHeaderView.ResizeToContents)
+        if len(table_headers) >= 3:
+            hh.setSectionResizeMode(len(table_headers) - 1, QHeaderView.Stretch)
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QTableWidgetItem
 
     def _populate_people_table(self) -> None:
         if self._last_df is None:
             self.table_people.setRowCount(0)
+            self._update_selection_counter()
             return
 
-        # set de rânduri invalide din validare (Excel row: 2..)
-        invalid_excel_rows = {int(e["row"]) for e in (self._last_errors or [])}
         df = self._last_df
-
-        # culori (subtil, nu țipător)
-        invalid_bg = QColor("#3a1e1e")  # roșu închis
-        invalid_fg = QColor("#ffd6d6")  # text roz-pal (opțional)
 
         self.table_people.blockSignals(True)
         self.table_people.setSortingEnabled(False)
@@ -273,189 +439,359 @@ class MainWindow(QMainWindow):
 
         for i, (_, row) in enumerate(df.iterrows()):
             excel_row = i + 2
-            is_invalid = excel_row in invalid_excel_rows
 
-            # Col 0: checkbox "Export"
+            # Col 0: Export (UN SINGUR checkbox, state ținut în item)
             chk = QTableWidgetItem()
-            if is_invalid:
-                # Rând invalid: checkbox dezactivat
-                chk.setFlags(Qt.ItemIsEnabled)  # fără ItemIsUserCheckable
-                chk.setCheckState(Qt.Unchecked)
-                chk.setToolTip("Rând invalid (are erori). Vezi tab-ul „Erori”.")
-            else:
-                chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-                chk.setCheckState(Qt.Checked)
-                chk.setToolTip("Selectat pentru export")
-
+            chk.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+            chk.setCheckState(Qt.Unchecked)  # default: totul deselectat
+            chk.setTextAlignment(Qt.AlignCenter)
             self.table_people.setItem(i, 0, chk)
 
-            # Restul coloanelor (1..5)
-            values = [
-                str(excel_row),
-                str(row.get("Nume", "")),
-                str(row.get("Prenume", "")),
-                str(row.get("CNP", "")),
-                str(row.get("Email", "")),
-            ]
+            # Col 1: Excel Row
+            it_row = QTableWidgetItem(str(excel_row))
+            it_row.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            it_row.setTextAlignment(Qt.AlignCenter)
+            self.table_people.setItem(i, 1, it_row)
 
-            for col, val in enumerate(values, start=1):
-                item = QTableWidgetItem(val)
-                if is_invalid:
-                    item.setToolTip("Rând invalid (are erori). Vezi tab-ul „Erori”.")
-                self.table_people.setItem(i, col, item)
-
-            # Evidențiere vizuală pentru rând invalid (toate coloanele)
-            if is_invalid:
-                for col in range(0, 6):
-                    cell = self.table_people.item(i, col)
-                    if cell:
-                        cell.setBackground(invalid_bg)
-                        # opțional: text mai deschis
-                        cell.setForeground(invalid_fg)
+            # Col 2..: coloanele Excel
+            for j, col_name in enumerate(self._excel_headers, start=2):
+                val = row.get(col_name, "")
+                it = QTableWidgetItem("" if val is None else str(val))
+                it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.table_people.setItem(i, j, it)
 
         self.table_people.setSortingEnabled(True)
-
-        # deblocăm semnalele și actualizăm contorul
         self.table_people.blockSignals(False)
+
         self._update_selection_counter()
 
-        # activează butoanele de selecție (dacă le ai)
-        if hasattr(self, "btn_select_none"):
-            self.btn_select_none.setEnabled(True)
-        if hasattr(self, "btn_select_valid"):
-            self.btn_select_valid.setEnabled(True)
-        if hasattr(self, "btn_select_filtered"):
-            self.btn_select_filtered.setEnabled(True)
-
-    def on_export_errors(self) -> None:
-        if not self._last_errors:
-            QMessageBox.information(self, "Export erori", "Nu există erori de exportat.")
+    # ---------------------------
+    # Column reordering persist
+    # ---------------------------
+    def _on_header_section_moved(self, logicalIndex: int, oldVisualIndex: int, newVisualIndex: int) -> None:
+        # blochează mutarea oricărei coloane în primele 2 poziții
+        if newVisualIndex < 2 or oldVisualIndex < 2:
+            hh = self.table_people.horizontalHeader()
+            hh.blockSignals(True)
+            hh.moveSection(newVisualIndex, oldVisualIndex)  # revert
+            hh.blockSignals(False)
             return
 
-        suggested = default_errors_filename()
-        out_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Salvează raportul de erori",
-            suggested,
-            "Excel Files (*.xlsx)"
-        )
-        if not out_path:
+        self._save_current_column_order()
+
+    def _save_current_column_order(self) -> None:
+        if not self._column_order_key:
             return
 
+        hh = self.table_people.horizontalHeader()
+
+        visual_to_name: dict[int, str] = {}
+        for logical in range(self.table_people.columnCount()):
+            item = self.table_people.horizontalHeaderItem(logical)
+            if not item:
+                continue
+            name = item.text()
+            visual = hh.visualIndex(logical)
+            visual_to_name[visual] = name
+
+        ordered = [visual_to_name[v] for v in sorted(visual_to_name.keys())]
+        excel_only = [x for x in ordered if x not in ("Export", "Excel Row")]
+
+        self._persist_column_order(self._column_order_key, excel_only)
+        self._saved_column_order = list(excel_only)
+
+        # also rebuild menu to match current order
+        self._rebuild_columns_menu()
+
+    # ---------------------------
+    # Search columns menu
+    # ---------------------------
+    def _rebuild_columns_menu(self) -> None:
+        self.columns_menu.clear()
+
+        if not self._excel_headers:
+            self.btn_columns.setEnabled(False)
+            self.btn_columns.setText("Coloane: (niciuna)")
+            return
+
+        self.btn_columns.setEnabled(True)
+
+        # default: NONE selected
+        for col in self._excel_headers:
+            act = QAction(col, self.columns_menu)
+            act.setCheckable(True)
+            act.setChecked(False)
+            act.toggled.connect(self._on_columns_changed)
+            self.columns_menu.addAction(act)
+
+        self._update_columns_button_text()
+
+    def _parse_number_ro(self, s: str) -> float | None:
+        s = s.strip()
+        if not s:
+            return None
+        # acceptă "5 000", "5.000", "5000", "5000,50"
+        s = s.replace(" ", "")
+        # dacă are și "." și "," -> considerăm "." mii, "," zecimal
+        if "," in s and "." in s:
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            # dacă doar "," -> zecimal
+            s = s.replace(",", ".")
+        # dacă doar "." -> poate fi zecimal sau mii; nu ghicim mii, lăsăm float
         try:
-            saved_path = export_errors_to_xlsx(self._last_errors, out_path)
-        except Exception as e:
-            QMessageBox.critical(self, "Eroare export", str(e))
-            return
+            return float(s)
+        except Exception:
+            return None
 
-        QMessageBox.information(self, "Export erori", f"Raport salvat:\n{saved_path}")
+    def _get_salary_value(self, row_items: dict[str, str]) -> float | None:
+        # încearcă să ia salariul din coloana "Salariu" (case-insensitive)
+        for k, v in row_items.items():
+            if k.strip().lower() == "salariu":
+                return self._parse_number_ro(v)
+        return None
 
-    def populate_errors(self, errors: list[dict]) -> None:
+    def _selected_search_columns(self) -> list[str]:
+        if not hasattr(self, "columns_menu"):
+            return []
+        return [a.text() for a in self.columns_menu.actions() if a.isChecked()]
+
+    # ---------------------------
+    # Filtering (text + salary)
+    # ---------------------------
+    def apply_search_filter(self, text: str) -> None:
         """
-        errors format:
-        [
-          {"row": 2, "errors": {"CNP": "...", "IBAN": "..."}}
-        ]
-        We'll show 1 table row per field error for clarity.
+        Reguli:
+          - separi criteriile prin '|'
+          - toate criteriile trebuie să fie adevărate (AND)
+          - criteriu text: apare în ORICE coloană selectată
+          - criteriu salariu:
+              salariu>5000, salariu<=4500, salariu=5000
+              salariu 5000-7000
         """
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(0)
+        t = (text or "").strip()
+        clauses = [c.strip() for c in t.split("|") if c.strip()]
 
-        rows_added = 0
-        for entry in errors:
-            excel_row = entry.get("row")
-            field_errors = entry.get("errors", {})
+        # ce coloane folosim pt text search
+        selected = getattr(self, "_search_headers_selected", None) or []
+        selected_lower = {s.lower() for s in selected}
 
-            for field, msg in field_errors.items():
-                self.table.insertRow(rows_added)
+        def row_matches(r: int) -> bool:
+            # construim dict header->value din tabelul vizibil (din UI)
+            headers = []
+            for c in range(self.table_people.columnCount()):
+                h = self.table_people.horizontalHeaderItem(c)
+                headers.append(h.text() if h else f"col{c}")
 
-                item_row = QTableWidgetItem(str(excel_row))
-                item_row.setData(Qt.UserRole, excel_row)  # numeric sorting helper
-                item_row.setTextAlignment(Qt.AlignCenter)
+            row_items: dict[str, str] = {}
+            for c, h in enumerate(headers):
+                it = self.table_people.item(r, c)
+                row_items[h] = "" if it is None else (it.text() or "")
 
-                item_field = QTableWidgetItem(str(field))
-                item_msg = QTableWidgetItem(str(msg))
+            # coloanele de căutare (ignorăm primele 2: Export + Excel Row)
+            # dacă user a selectat explicit coloane, filtrăm la alea.
+            def text_haystack() -> list[str]:
+                vals = []
+                for c, h in enumerate(headers):
+                    if c < 2:
+                        continue
+                    if selected_lower and h.lower() not in selected_lower:
+                        continue
+                    vals.append((row_items.get(h) or "").lower())
+                return vals
 
-                self.table.setItem(rows_added, 0, item_row)
-                self.table.setItem(rows_added, 1, item_field)
-                self.table.setItem(rows_added, 2, item_msg)
+            hay = text_haystack()
+            salary_val = self._get_salary_value(row_items)
 
-                rows_added += 1
+            for clause in clauses:
+                low = clause.lower()
 
-        self.table.setSortingEnabled(True)
-        self.table.resizeColumnsToContents()
+                # --- interval: "salariu 5000-7000" (acceptă și "salariu: 5000-7000")
+                m_range = re.match(r"^salariu\s*[: ]\s*([0-9\., ]+)\s*-\s*([0-9\., ]+)\s*$", low)
+                if m_range:
+                    a = self._parse_number_ro(m_range.group(1))
+                    b = self._parse_number_ro(m_range.group(2))
+                    if a is None or b is None or salary_val is None:
+                        return False
+                    lo2, hi2 = (a, b) if a <= b else (b, a)
+                    if not (lo2 <= salary_val <= hi2):
+                        return False
+                    continue
+
+                # --- comparator: "salariu>=5000"
+                m_cmp = re.match(r"^salariu\s*(>=|<=|=|>|<)\s*([0-9\., ]+)\s*$", low)
+                if m_cmp:
+                    op = m_cmp.group(1)
+                    x = self._parse_number_ro(m_cmp.group(2))
+                    if x is None or salary_val is None:
+                        return False
+                    if op == ">" and not (salary_val > x): return False
+                    if op == "<" and not (salary_val < x): return False
+                    if op == ">=" and not (salary_val >= x): return False
+                    if op == "<=" and not (salary_val <= x): return False
+                    if op == "=" and not (salary_val == x): return False
+                    continue
+
+                # --- text clause
+                needle = low
+                if not needle:
+                    continue
+                # match dacă apare în ORICE coloană selectată (sau toate dacă none selectate)
+                if not any(needle in v for v in hay):
+                    return False
+
+            return True
+
+        # aplică hide/show
+        self.table_people.blockSignals(True)
+        for r in range(self.table_people.rowCount()):
+            hide = False
+            if clauses:
+                hide = not row_matches(r)
+            self.table_people.setRowHidden(r, hide)
+        self.table_people.blockSignals(False)
+
+        # dacă ai counter, cheamă-l aici
+        if hasattr(self, "_update_selection_counter"):
+            self._update_selection_counter()
+
+    # ---------------------------
+    # Selection
+    # ---------------------------
+    def _set_all_checks(self, state: Qt.CheckState, *, only_visible: bool = False) -> None:
+        model = self.table_people.model()
+        self.table_people.blockSignals(True)
+        try:
+            for r in range(self.table_people.rowCount()):
+                if only_visible and self.table_people.isRowHidden(r):
+                    continue
+
+                idx = model.index(r, 0)  # col 0 = checkbox
+                # setData pe model => delegate vede imediat
+                model.setData(idx, state, Qt.CheckStateRole)
+        finally:
+            self.table_people.blockSignals(False)
+
+        # repaint + counter
+        self.table_people.viewport().update()
+        self._update_selection_counter()
+        self._last_generated_docx_files = []
+        self.btn_generate_pdf.setEnabled(False)
+
+    def on_select_none(self) -> None:
+        self._set_all_checks(Qt.Unchecked)
+
+    def on_select_all(self) -> None:
+        self._set_all_checks(Qt.Checked)
+
+    def on_select_filtered(self) -> None:
+        self._set_all_checks(Qt.Checked, only_visible=True)
+
+    def _update_selection_counter(self) -> None:
+        total = self.table_people.rowCount()
+        selected = 0
+        for r in range(total):
+            chk = self.table_people.item(r, 0)
+            if chk and chk.checkState() == Qt.Checked:
+                selected += 1
+        self.lbl_counter.setText(f"Selectate: {selected} / Total: {total}")
+
+    def _on_people_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() == 0:  # doar checkbox
+            self._update_selection_counter()
+            self._last_generated_docx_files = []
+            self.btn_generate_pdf.setEnabled(False)
+
+    # ---------------------------
+    # DOCX generation
+    # ---------------------------
+    def _row_to_context(self, row: Any) -> tuple[dict[str, Any], set[str]]:
+        """
+        Context dinamic:
+          - chei = SAFE placeholders (din _col_map)
+          - valori = din excel (string), fallback '—' dacă lipsesc
+        Returnează (ctx, missing_optional_safe)
+        """
+        ctx: dict[str, Any] = {}
+        missing: set[str] = set()
+
+        for excel_name in self._excel_headers:
+            safe_key = self._col_map.get(excel_name, _safe_placeholder(excel_name))
+            raw = row.get(excel_name, None)
+            val = "" if raw is None else str(raw).strip()
+            if not val or val.lower() in ("nan", "<na>", "none"):
+                ctx[safe_key] = "—"
+                missing.add(safe_key)
+            else:
+                ctx[safe_key] = val
+
+        return ctx, missing
 
     def on_generate_docx(self) -> None:
         if self._last_df is None:
             QMessageBox.information(self, "Generare DOCX", "Mai întâi importă un fișier Excel.")
             return
 
-        # Template default
-        default_template = str(resource_path("templates/contract_template.docx"))
-        template_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Selectează template-ul DOCX",
-            default_template,
-            "Word Template (*.docx)"
-        )
-        if not template_path:
-            return
-
-        self._last_template_path = template_path
-
-        out_dir = QFileDialog.getExistingDirectory(
-            self,
-            "Selectează folderul de output pentru DOCX",
-            str(Path("output") / "docx")
-        )
-        if not out_dir:
-            return
-
-        out_path = Path(out_dir)
-
-        # rânduri invalide din validare
-        invalid_excel_rows = {int(e["row"]) for e in (self._last_errors or [])}
-
-        warnings_optional_total: set[str] = set()
-        skipped_validation = 0
-        generated = 0
-
-        # selecția din UI
-        selected_excel_rows = set()
+        # selecția curentă (din item checkstate, NU din cellWidget)
+        selected_excel_rows: set[int] = set()
         for r in range(self.table_people.rowCount()):
-            chk = self.table_people.item(r, 0)
-            if chk and chk.checkState() == Qt.Checked:
-                excel_row = int(self.table_people.item(r, 1).text())
-                selected_excel_rows.add(excel_row)
+            item = self.table_people.item(r, 0)  # col 0 = checkbox item
+            if item and item.checkState() == Qt.Checked:
+                excel_row_item = self.table_people.item(r, 1)
+                if excel_row_item:
+                    selected_excel_rows.add(int(excel_row_item.text()))
 
         if not selected_excel_rows:
             QMessageBox.information(self, "Generare DOCX", "Nu ai selectat nicio persoană pentru export.")
             return
 
-        # lista de DOCX generate (pentru PDF)
+        default_template = str(resource_path("templates/contract_template.docx"))
+        template_path, _ = QFileDialog.getOpenFileName(
+            self, "Selectează template-ul DOCX", default_template, "Word Template (*.docx)"
+        )
+        if not template_path:
+            return
+        self._last_template_path = template_path
+
+        default_dir = getattr(self, "_last_save_dir", "") or QStandardPaths.writableLocation(
+            QStandardPaths.DocumentsLocation)
+
+        out_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Alege unde să salvezi documentele (DOCX)",
+            default_dir
+        )
+        if not out_dir:
+            return
+
+        # ținem minte pentru data viitoare
+        self._last_save_dir = out_dir
+        out_path = Path(out_dir)
+
         generated_files: list[Path] = []
+        skipped_missing_mandatory = 0
+        warnings_optional_total: set[str] = set()
+
+        # safe keys for Nume/Prenume (dacă există în excel)
+        safe_nume = self._col_map.get("Nume", "Nume")
+        safe_prenume = self._col_map.get("Prenume", "Prenume")
 
         for idx, row in self._last_df.iterrows():
             excel_row = idx + 2
-
             if excel_row not in selected_excel_rows:
                 continue
 
-            # sari peste rânduri invalide (din validare)
-            if excel_row in invalid_excel_rows:
-                skipped_validation += 1
+            ctx, missing_optional = self._row_to_context(row)
+            warnings_optional_total |= set(missing_optional)
+
+            # mandatory enforcement (hard + bold)
+            missing_mand = [k for k in self._mandatory_safe if ctx.get(k) == "—"]
+            if missing_mand:
+                skipped_missing_mandatory += 1
                 continue
 
-            # context dinamic (toate coloanele) + company.json
-            ctx, _missing_required, missing_optional = build_context_with_missing(row)
-
-            # colectăm warnings (coloane lipsă -> fallback "—")
-            warnings_optional_total.update(missing_optional)
-
-            # --- nume fișier ---
-            # dacă Nume/Prenume lipsesc, folosim excel_row ca fallback ca să nu iasă "—"
-            raw_nume = str(ctx.get("Nume", "")).strip()
-            raw_prenume = str(ctx.get("Prenume", "")).strip()
+            raw_nume = str(ctx.get(safe_nume, "")).strip()
+            raw_prenume = str(ctx.get(safe_prenume, "")).strip()
 
             nume = self.safe_name(raw_nume) if raw_nume and raw_nume != "—" else f"Row{excel_row}"
             prenume = self.safe_name(raw_prenume) if raw_prenume and raw_prenume != "—" else ""
@@ -468,52 +804,45 @@ class MainWindow(QMainWindow):
 
             candidate = out_path / f"{base}.docx"
 
-            # dacă există deja, încearcă să distingă cu ultimele 4 din CNP (dacă există)
-            if candidate.exists():
-                cnp = str(ctx.get("CNP", "")).strip()
-                cnp = cnp if cnp and cnp != "—" else ""
-                if len(cnp) >= 4:
-                    last4 = self.safe_name(cnp[-4:])
-                    candidate = out_path / f"{base}_{last4}.docx"
+            # dacă există deja, pune sufix incremental
+            k = 1
+            while candidate.exists():
+                candidate = out_path / f"{base}_dup{k}.docx"
+                k += 1
 
-                # dacă și așa există, pune sufix incremental
-                k = 1
-                while candidate.exists():
-                    candidate = out_path / f"{base}_dup{k}.docx"
-                    k += 1
+            try:
+                saved = generate_docx_for_employee(
+                    template_path=template_path,
+                    output_dir=out_dir,
+                    context=ctx,
+                    filename=candidate.name
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Eroare generare DOCX",
+                    f"Nu am putut genera documentul pentru rândul Excel {excel_row}.\n\n"
+                    f"Eroare: {type(e).__name__}: {e}\n\n"
+                    "Sugestie: folosește Tools → Câmpuri template și copiază EXACT placeholder-ele safe."
+                )
+                return
 
-            filename = candidate.name
+            generated_files.append(Path(saved))
 
-            saved = generate_docx_for_employee(
-                template_path=template_path,
-                output_dir=out_dir,
-                context=ctx,
-                filename=filename
-            )
-
-            generated += 1
-            generated_files.append(saved)
-
-        # salvează pentru PDF (respectă batch-ul curent)
-        self._last_generated_docx_dir = out_dir
         self._last_generated_docx_files = generated_files
-
-        # enable PDF doar dacă s-a generat ceva
+        self._last_generated_docx_dir = out_dir
         self.btn_generate_pdf.setEnabled(len(generated_files) > 0)
 
-        # reține lipsurile pt dialogul de câmpuri (acum sunt doar "coloane goale")
-        self._last_missing_optional = set(warnings_optional_total)
-        self._last_missing_required = set()  # nu mai există required
-
-        msg = (
+        QMessageBox.information(
+            self,
+            "Generare DOCX",
             f"Gata.\n"
-            f"Generate: {generated}\n"
-            f"Sărite (validare Excel): {skipped_validation}\n"
+            f"Generate: {len(generated_files)}\n"
+            f"Sărite (mandatory lipsă): {skipped_missing_mandatory}\n"
             f"Folder: {out_dir}"
         )
-        QMessageBox.information(self, "Generare DOCX", msg)
 
-        # Warning non-blocant pentru câmpuri goale
+        # warning optional (non blocant)
         if warnings_optional_total:
             preview = ", ".join(sorted(list(warnings_optional_total))[:12])
             more = "" if len(warnings_optional_total) <= 12 else f" (+{len(warnings_optional_total) - 12} altele)"
@@ -521,66 +850,74 @@ class MainWindow(QMainWindow):
                 self,
                 "Atenție: câmpuri goale",
                 "Unele coloane din Excel nu au fost completate și au fost înlocuite cu „—”.\n\n"
-                f"Câmpuri: {preview}{more}"
+                f"Câmpuri (placeholdere safe): {preview}{more}"
             )
 
+    # ---------------------------
+    # PDF generation (same folder as DOCX)
+    # ---------------------------
     def on_generate_pdf(self) -> None:
-        files = getattr(self, "_last_generated_docx_files", None)
+        files = getattr(self, "_last_generated_docx_files", None) or []
         if not files:
-            QMessageBox.information(
-                self, "PDF",
-                "Nu am o listă de documente generate.\n"
-                "Generează mai întâi DOCX pentru selecția curentă."
-            )
+            QMessageBox.information(self, "PDF", "Generează mai întâi DOCX pentru selecția curentă.")
             return
 
-        # păstrează doar fișierele care există (user poate să le fi mutat/șters)
-        existing = [Path(p) for p in files if Path(p).exists()]
+        existing: list[Path] = []
+        for p in files:
+            pp = Path(p)
+            if pp.exists():
+                existing.append(pp)
+
         if not existing:
-            QMessageBox.information(
-                self, "PDF",
-                "Nu găsesc documentele DOCX generate (au fost mutate/șterse?).\n"
-                "Generează din nou DOCX."
-            )
+            QMessageBox.information(self, "PDF", "Nu găsesc documentele DOCX generate. Generează din nou DOCX.")
             return
-
-        # output pdf folder: lângă docx folder
-        docx_dir = existing[0].parent
-        pdf_dir = docx_dir.parent / "pdf"
-        pdf_dir.mkdir(exist_ok=True)
 
         generated = 0
-        failed = 0
-        failed_files = []
+        failed_files: list[str] = []
 
         for docx_file in existing:
             try:
-                pdf_path = pdf_dir / docx_file.with_suffix(".pdf").name
+                pdf_path = docx_file.with_suffix(".pdf")  # ACELAȘI FOLDER
                 docx_to_pdf(docx_file, pdf_path)
                 generated += 1
             except Exception as e:
-                failed += 1
                 failed_files.append(f"{docx_file.name}: {e}")
 
-        if failed == 0:
-            QMessageBox.information(
-                self,
-                "PDF generate",
-                f"Gata.\nPDF-uri generate: {generated}\nFolder: {pdf_dir}"
-            )
+        folder = str(existing[0].parent)
+
+        if not failed_files:
+            QMessageBox.information(self, "PDF generate", f"Gata.\nPDF-uri generate: {generated}\nFolder: {folder}")
             return
 
-        # dacă au fost erori, arată un sumar + primele N
         preview = "\n".join(failed_files[:8])
         more = "" if len(failed_files) <= 8 else f"\n(+{len(failed_files) - 8} altele)"
-
         QMessageBox.warning(
             self,
             "PDF generate (cu erori)",
-            f"Gata.\nPDF-uri generate: {generated}\nEșuate: {failed}\nFolder: {pdf_dir}\n\n"
+            f"Gata.\nPDF-uri generate: {generated}\nEșuate: {len(failed_files)}\nFolder: {folder}\n\n"
             f"Detalii:\n{preview}{more}"
         )
 
+    # ---------------------------
+    # Tools -> Template fields
+    # ---------------------------
+    def on_show_template_fields(self) -> None:
+        if self._last_df is None:
+            QMessageBox.information(self, "Câmpuri template", "Mai întâi importă un fișier Excel.")
+            return
+
+        dlg = TemplateFieldsDialog(
+            parent=self,
+            excel_columns=list(self._excel_headers),
+            col_map=dict(self._col_map),
+            mandatory_headers=set(self._mandatory_headers),
+            hard_mandatory=set(HARD_MANDATORY_HEADERS),
+        )
+        dlg.exec()
+
+    # ---------------------------
+    # About
+    # ---------------------------
     def on_about(self) -> None:
         from PySide6.QtWidgets import QMessageBox
         from core.version import APP_NAME, APP_VERSION, APP_COPYRIGHT
@@ -670,233 +1007,28 @@ class MainWindow(QMainWindow):
 
         QMessageBox.information(self, "About", html)
 
-    def on_show_template_fields(self) -> None:
-        if self._last_df is None:
-            QMessageBox.information(self, "Câmpuri", "Mai întâi importă un fișier Excel.")
+    def _update_columns_button_text(self) -> None:
+        cols = self._selected_search_columns()
+        if not cols:
+            self.btn_columns.setText("Coloane: (niciuna)")
             return
 
-        company_ctx = load_company_context()
+        shown = ", ".join(cols[:2])
+        more = f" +{len(cols) - 2}" if len(cols) > 2 else ""
+        self.btn_columns.setText(f"Coloane: {shown}{more}")
 
-        dlg = TemplateFieldsDialog(
-            self,
-            excel_columns=list(self._last_df.columns),
-            company_keys=list(company_ctx.keys()),
-        )
-        dlg.exec()
+    def _on_columns_changed(self, _checked: bool) -> None:
+        self._update_columns_button_text()
+        self.apply_search_filter(self.search_input.text())
 
-    def _set_all_checks(self, state: Qt.CheckState) -> None:
-        for r in range(self.table_people.rowCount()):
-            item = self.table_people.item(r, 0)
-            if item is None:
-                continue
-            if item.flags() & Qt.ItemIsUserCheckable:
-                item.setCheckState(state)
-
-    def on_select_none(self) -> None:
-        self._set_all_checks(Qt.Unchecked)
-        self._update_selection_counter()
-
-    def on_select_valid_only(self) -> None:
-        self._set_all_checks(Qt.Checked)
-        self._update_selection_counter()
-
-    def _update_selection_counter(self) -> None:
-        if self.table_people.rowCount() == 0:
-            self.lbl_counter.setText("Selectate: 0 / Valide: 0")
-            return
-
-        selected = 0
-        valid = 0
-        for r in range(self.table_people.rowCount()):
-            chk = self.table_people.item(r, 0)
-            if chk is None:
-                continue
-            if chk.flags() & Qt.ItemIsUserCheckable:
-                valid += 1
-                if chk.checkState() == Qt.Checked:
-                    selected += 1
-
-        self.lbl_counter.setText(f"Selectate: {selected} / Valide: {valid}")
-
-    def _on_people_item_changed(self, item: QTableWidgetItem) -> None:
-        # ne interesează doar checkbox-ul din col 0
-        if item.column() != 0:
-            return
-        self._update_selection_counter()
-        self._last_generated_docx_files = []
-        self.btn_generate_pdf.setEnabled(False)
-
-    def on_search_people(self, text: str) -> None:
-        q = (text or "").strip().lower()
-
-        for r in range(self.table_people.rowCount()):
-            # Col 2 = Nume, Col 3 = Prenume (din tabelul tău)
-            nume = (self.table_people.item(r, 2).text() if self.table_people.item(r, 2) else "").lower()
-            prenume = (self.table_people.item(r, 3).text() if self.table_people.item(r, 3) else "").lower()
-            full = f"{nume} {prenume}".strip()
-
-            match = (q in nume) or (q in prenume) or (q in full) if q else True
-            self.table_people.setRowHidden(r, not match)
-
-    def _parse_salary_filter(self, text: str):
-        """
-        Acceptă în search:
-          salariu>5000
-          salariu>= 5000
-          salariu=5000
-          salariu<=4500
-          salariu< 3000
-        Returnează tuple (op, value) sau None.
-        """
-        t = (text or "").strip().lower().replace(" ", "")
-        m = re.search(r"(salariu)(<=|>=|=|<|>)(-?\d+(?:[.,]\d+)?)", t)
-        if not m:
+    def _get_check_item(self, row: int) -> QTableWidgetItem | None:
+        """Returnează item-ul checkable din col 0 (sau None)."""
+        it = self.table_people.item(row, 0)
+        if not it:
             return None
-        op = m.group(2)
-        val_s = m.group(3).replace(",", ".")
-        try:
-            val = float(val_s)
-        except Exception:
+        if not (it.flags() & Qt.ItemIsUserCheckable):
             return None
-        return op, val
-
-    def _cell_salary_to_float(self, row_index: int) -> float | None:
-        """
-        Ia salariul din tabel (coloana 'Salariu' dacă o ai în people table),
-        sau din df dacă nu e afișat în tabel.
-        Recomand: dacă nu ai coloană Salariu în tabel, citește din self._last_df.
-        """
-        # VARIANTA 1: dacă ai coloană Salariu în table_people
-        # col_salary = ... (index)
-        # item = self.table_people.item(row_index, col_salary)
-        # s = item.text() if item else ""
-        # ...
-
-        # VARIANTA 2 (mai robust): din df
-        if self._last_df is None:
-            return None
-        try:
-            salary_raw = self._last_df.iloc[row_index].get("Salariu", None)
-        except Exception:
-            return None
-
-        # folosește aceeași logică ca în validare (simplificat)
-        if salary_raw is None:
-            return None
-        s = str(salary_raw).strip().replace(" ", "")
-        if not s or s.lower() in ("nan", "<na>", "none"):
-            return None
-        if "." in s and "," in s:
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            if "," in s and "." not in s:
-                s = s.replace(",", ".")
-            if re.fullmatch(r"\d{1,3}(\.\d{3})+", s):
-                s = s.replace(".", "")
-        try:
-            return float(s)
-        except Exception:
-            return None
-
-    def _match_salary(self, actual: float | None, flt) -> bool:
-        if flt is None:
-            return True
-        if actual is None:
-            return False
-        op, val = flt
-        if op == ">":
-            return actual > val
-        if op == ">=":
-            return actual >= val
-        if op == "<":
-            return actual < val
-        if op == "<=":
-            return actual <= val
-        return actual == val
-
-    def apply_search_filter(self, text: str) -> None:
-        q = (text or "").strip().lower()
-
-        # detect salariu filter
-        salary_filter = self._parse_salary_filter(q)
-        salary_range = self._parse_salary_range(q)
-
-        # scoate partea de salariu din text ca să rămână doar nume/prenume
-        name_query = re.sub(r"(salariu)\s*(<=|>=|=|<|>)\s*(-?\d+(?:[.,]\d+)?)", "", q).strip()
-        name_query = re.sub(r"salariu\s*[: ]\s*(\d+(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)", "", name_query).strip()
-
-        for r in range(self.table_people.rowCount()):
-            nume = (self.table_people.item(r, 2).text() if self.table_people.item(r, 2) else "").lower()
-            prenume = (self.table_people.item(r, 3).text() if self.table_people.item(r, 3) else "").lower()
-
-            ok_name = True
-            if name_query:
-                full = f"{nume} {prenume}".strip()
-                ok_name = (name_query in nume) or (name_query in prenume) or (name_query in full)
-
-            sal = self._cell_salary_to_float(r)
-
-            ok_salary = True
-            if salary_filter is not None:
-                ok_salary = self._match_salary(sal, salary_filter)
-            elif salary_range is not None:
-                if sal is None:
-                    ok_salary = False
-                else:
-                    lo, hi = salary_range
-                    ok_salary = (lo <= sal <= hi)
-
-            self.table_people.setRowHidden(r, not (ok_name and ok_salary))
-
-        if hasattr(self, "_update_counter"):
-            self._update_counter()
-
-    def _parse_salary_range(self, text: str):
-        """
-        Acceptă:
-          salariu 5000-7000
-          salariu:5000-7000
-          5000-7000 (dacă vrei, dar eu îl leg de cuvântul 'salariu' ca să nu fie ambiguu)
-        """
-        t = (text or "").strip().lower()
-        # permite spații, ':' etc
-        m = re.search(r"salariu\s*[: ]\s*(\d+(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)", t)
-        if not m:
-            return None
-        a = float(m.group(1).replace(",", "."))
-        b = float(m.group(2).replace(",", "."))
-        lo, hi = (a, b) if a <= b else (b, a)
-        return (lo, hi)
-
-    def on_select_filtered(self) -> None:
-        """
-        Bifează pentru export doar rândurile:
-          - vizibile (după filtrare)
-          - valide (checkbox activ / user-checkable)
-        """
-        for r in range(self.table_people.rowCount()):
-            if self.table_people.isRowHidden(r):
-                continue
-
-            chk = self.table_people.item(r, 0)
-            if not chk:
-                continue
-
-            # Bifează doar dacă e valid (are flag de checkable)
-            if chk.flags() & Qt.ItemIsUserCheckable:
-                chk.setCheckState(Qt.Checked)
-
-        # dacă ai contor, îl actualizezi
-        if hasattr(self, "_update_counter"):
-            self._update_counter()
-
-
-
-
-
-
-
-
+        return it
 
 
 

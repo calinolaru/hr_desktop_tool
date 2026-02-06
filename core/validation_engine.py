@@ -1,58 +1,63 @@
 # core/validation_engine.py
 from __future__ import annotations
-from datetime import date, datetime
-import re
+
 from typing import Any
-import pandas as pd
-from core.constants import REQUIRED_EXCEL_COLUMNS
-from core.validators import validate_cnp, validate_email, validate_iban, validate_required
+
+from datetime import datetime
 
 
-def _is_empty(value: Any) -> bool:
-    if value is None:
+def _is_empty(v: Any) -> bool:
+    if v is None:
         return True
+    s = str(v).strip()
+    if s == "":
+        return True
+    # pandas NaN
     try:
-        if pd.isna(value):
-            return True
+        import pandas as pd
+        return pd.isna(v)
     except Exception:
-        pass
-    return str(value).strip() == ""
+        return False
 
-def _parse_salary(val: Any) -> float | None:
-    """
-    Acceptă:
-      - număr (int/float)
-      - string: "5000", "5.000", "5,000", "5000.50", "5000,50"
-    Returnează float sau None dacă e invalid.
-    """
-    if val is None:
+
+def _parse_salary(v: Any) -> float | None:
+    if _is_empty(v):
         return None
-
-    s = str(val).strip()
-    if not s or s.lower() in ("nan", "<na>", "none"):
-        return None
-
-    # elimină spații
-    s = s.replace(" ", "")
-
-    # tratează separatori mii și zecimale:
-    # - dacă are și '.' și ',' -> presupunem '.' mii, ',' zecimal (RO)
-    if "." in s and "," in s:
-        s = s.replace(".", "").replace(",", ".")
-    else:
-        # dacă are doar ',' -> zecimal RO
-        if "," in s and "." not in s:
-            s = s.replace(",", ".")
-        # dacă are doar '.' -> zecimal EN (ok)
-
-        # caz "5.000" (mii) fără zecimale: dacă pattern de mii, scoate '.'
-        if re.fullmatch(r"\d{1,3}(\.\d{3})+", s):
-            s = s.replace(".", "")
-
+    s = str(v).strip().replace(" ", "")
+    s = s.replace(",", ".")
     try:
         return float(s)
     except Exception:
         return None
+
+
+def validate_row(row: Any, mandatory_headers: set[str] | None = None) -> dict[str, str]:
+    """
+    Return dict: field -> error message
+    """
+    mandatory_headers = mandatory_headers or set()
+
+    errors: dict[str, str] = {}
+
+    # mandatory by rule
+    must_have = {"Nume", "Prenume", "Salariu"} | set(mandatory_headers)
+
+    for col in must_have:
+        if col in row.index:
+            if _is_empty(row.get(col)):
+                errors[col] = "Câmp obligatoriu (marcat mandatory)."
+        else:
+            errors[col] = "Coloană obligatorie lipsă din Excel."
+
+    # Salary format validation (dacă există)
+    if "Salariu" in row.index:
+        val = row.get("Salariu")
+        if not _is_empty(val):
+            if _parse_salary(val) is None:
+                errors["Salariu"] = "Salariu invalid (trebuie numeric)."
+
+    return errors
+
 
 def _parse_date_strict(value: Any) -> bool:
     """
@@ -75,52 +80,3 @@ def _parse_date_strict(value: Any) -> bool:
         except ValueError:
             continue
     return False
-
-def validate_row(row: Any) -> dict[str, str]:
-    """
-    Only Nume & Prenume are required.
-    Optional fields:
-      - empty -> OK
-      - filled -> validated
-    """
-    errors: dict[str, str] = {}
-
-    # Required fields
-    for col in REQUIRED_EXCEL_COLUMNS:
-        val = row.get(col) if hasattr(row, "get") else None
-        if not validate_required(val):
-            errors[col] = "Lipsă"
-
-    # Optional: DataAngajare (validate only if filled)
-    if hasattr(row, "index") and "DataAngajare" in row.index:
-        val = row.get("DataAngajare")
-        if not _is_empty(val) and not _parse_date_strict(val):
-            errors["DataAngajare"] = "Dată invalidă (YYYY-MM-DD, DD.MM.YYYY sau DD/MM/YYYY)"
-
-    # Optional: CNP
-    if hasattr(row, "index") and "CNP" in row.index:
-        val = row.get("CNP")
-        if not _is_empty(val) and not validate_cnp(val):
-            errors["CNP"] = "CNP invalid"
-
-    # Optional: IBAN
-    if hasattr(row, "index") and "IBAN" in row.index:
-        val = row.get("IBAN")
-        if not _is_empty(val) and not validate_iban(val):
-            errors["IBAN"] = "IBAN invalid"
-
-    # Optional: Email
-    if hasattr(row, "index") and "Email" in row.index:
-        val = row.get("Email")
-        if not _is_empty(val) and not validate_email(val):
-            errors["Email"] = "Email invalid"
-
-    # --- Salariu mandatory ---
-    salary_raw = row.get("Salariu", None)
-    salary = _parse_salary(salary_raw)
-    if salary is None:
-        errors["Salariu"] = "Salariu lipsă sau invalid (trebuie număr)."
-    elif salary <= 0:
-        errors["Salariu"] = "Salariu invalid (trebuie > 0)."
-
-    return errors

@@ -128,3 +128,78 @@ def generate_docx_for_employee(
     out_path = output_dir / filename
     doc.save(str(out_path))
     return out_path
+
+def sanitize_key(name: str) -> str:
+    """
+    Transformă numele de coloană Excel în placeholder valid pentru Jinja/docxtpl.
+    Exemplu: "Nr.Contract" -> "Nr_Contract"
+            "E-mail angajator" -> "E_mail_angajator"
+    """
+    s = (name or "").strip()
+
+    # înlocuiește orice nu e literă/cifră/_ cu _
+    s = re.sub(r"[^0-9a-zA-Z_]", "_", s)
+
+    # compactează underscores
+    s = re.sub(r"_+", "_", s).strip("_")
+
+    # dacă începe cu cifră, prefix
+    if s and s[0].isdigit():
+        s = f"col_{s}"
+
+    return s or "col"
+
+
+def build_dynamic_context_with_missing(
+    row: Any,
+    col_map: dict[str, str],
+) -> Tuple[dict[str, Any], list[str]]:
+    """
+    context: chei SAFE (placeholder) -> valori
+    missing_optional: lista cheilor SAFE care au rezultat fallback (celulă goală)
+    """
+    ctx: dict[str, Any] = {}
+    missing_optional: list[str] = []
+
+    # row e un pandas Series; row.get(original_col) merge
+    for original, safe in col_map.items():
+        val = row.get(original)
+
+        # normalize + fallback
+        if val is None:
+            norm = FALLBACK_VALUE
+        else:
+            # pandas NaN
+            try:
+                import pandas as pd
+                if pd.isna(val):
+                    norm = FALLBACK_VALUE
+                else:
+                    norm = str(val).strip() if str(val).strip() else FALLBACK_VALUE
+            except Exception:
+                norm = str(val).strip() if str(val).strip() else FALLBACK_VALUE
+
+        ctx[safe] = norm
+
+        if norm == FALLBACK_VALUE:
+            missing_optional.append(safe)
+
+    return ctx, missing_optional
+
+
+def generate_docx_for_employee(
+    template_path: str | Path,
+    output_dir: str | Path,
+    context: dict[str, Any],
+    filename: str,
+) -> Path:
+    template_path = Path(template_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    doc = DocxTemplate(str(template_path))
+    doc.render(context)
+
+    out_path = output_dir / filename
+    doc.save(str(out_path))
+    return out_path

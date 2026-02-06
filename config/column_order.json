@@ -1,0 +1,24 @@
+{
+  "a4db3abd5584c366e897292274fb4976fe7b34b9d5bf11ccef50971fcc541f48": [
+    "Nume",
+    "Prenume",
+    "Salariu",
+    "Functie",
+    "IBAN",
+    "CNP",
+    "DataAngajare",
+    "Email",
+    "TipContract",
+    "RegimMunca",
+    "Departament",
+    "COR",
+    "LocMunca",
+    "OreZi",
+    "OreSaptamana",
+    "ProgramLucru",
+    "ZileConcediu",
+    "Sporuri",
+    "Banca",
+    "Sanatate"
+  ]
+}
