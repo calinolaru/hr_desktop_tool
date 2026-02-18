@@ -1,7 +1,6 @@
 # app.py
 from __future__ import annotations
 import sys
-from PySide6.QtWidgets import QApplication, QMessageBox
 from core.license_manager import app_base_dir
 from ui.main_window import MainWindow
 from core.license_manager import load_and_validate_license, LicenseError
@@ -9,6 +8,9 @@ from core.machine_fingerprint import get_machine_fingerprint
 from core.license_manager import days_until_expiry
 from ui.style import APP_QSS
 from PySide6.QtWidgets import QApplication, QMessageBox, QStyleFactory
+from PySide6.QtGui import QIcon
+from core.paths import resource_path
+
 
 
 
@@ -16,6 +18,9 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle(QStyleFactory.create("Fusion"))
     app.setStyleSheet(APP_QSS)
+
+    icon_path = resource_path("app.ico")
+    app.setWindowIcon(QIcon(str(icon_path)))
 
     try:
         # asigură folder config lângă aplicație
@@ -74,6 +79,7 @@ def main() -> None:
         return  # IMPORTANT: nu continua, altfel 'lic' nu există
 
     w = MainWindow()
+    w.setWindowIcon(QIcon(str(icon_path)))
     w._license_info = lic  # type: ignore[attr-defined]
     w.show()
 
