@@ -9,19 +9,16 @@ din fișiere Excel, cu licențiere offline, PC-bound și protecție anti-abuz.
 
 - Import fișier Excel (`.xlsx`)
 - Citire dinamică a coloanelor (prima linie din Excel)
-- Validare date:
-  - email
-  - CNP
-  - salariu (**mandatory**)
+- Verificare la generare pentru câmpuri obligatorii (`Nume`, `Prenume`, `Salariu`
+  și coloanele marcate bold în header-ul Excel)
+- Email-ul și CNP-ul nu sunt validate automat
 - Căutare și filtrare:
-  - Nume / Prenume
-  - Salariu:
-    - `>5000`
-    - `<4000`
-    - `=6000`
-    - interval: `5000-7000`
+  - orice coloană sau coloane alese din „Coloane”
+  - `salariu>5000`, `salariu<=4000`, `salariu=6000`
+  - interval: `salariu 5000-7000`
+  - criterii multiple separate cu `|`
 - Selectare rânduri:
-  - selectează valide
+  - selectează tot
   - selectează rândurile filtrate
   - deselectează tot
 - Generare documente:
@@ -40,18 +37,22 @@ din fișiere Excel, cu licențiere offline, PC-bound și protecție anti-abuz.
 ## 📊 Fișier Excel (input)
 
 - Coloanele sunt citite **dinamic** din prima linie
-- **Mandatory**:
+- **Obligatorii la generare**:
   - `Nume`
   - `Prenume`
   - `Salariu`
-- Restul coloanelor sunt **opționale**
-- Celulele goale sunt înlocuite automat cu `—` în documente
+- Coloanele marcate bold în header sunt, de asemenea, obligatorii.
+- Câmpurile obligatorii lipsă opresc generarea documentului pentru rândul respectiv.
+- Restul coloanelor sunt **opționale**; email-ul și CNP-ul nu sunt validate automat.
+- Celulele opționale goale sunt înlocuite automat cu `—`; rândurile cu valori obligatorii lipsă nu sunt generate.
 
 ---
 
 ## 📄 Template DOCX
 
-- Placeholder-ele din Word trebuie să coincidă **exact** cu numele coloanelor din Excel:
+- Placeholder-ele trebuie să folosească numele safe afișate în **Tools → Câmpuri template**.
+  Spațiile și semnele de punctuație devin `_`, iar numele care începe cu o cifră primește prefixul `F_`.
+  De exemplu, coloana `E-mail angajator` devine `{{E_mail_angajator}}`.
 
 ```
 {{Nume}}
@@ -110,7 +111,7 @@ Clientul trimite acest fișier furnizorului.
 ## 🧾 Generare licență (furnizor)
 
 ```bash
-python tools/gen_license.py ^
+python tools/license_gen.py ^
   --type trial ^
   --company "ACME SRL" ^
   --vat "RO12345678" ^

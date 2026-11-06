@@ -1,15 +1,12 @@
 # ui/main_window.py
 from __future__ import annotations
 
-from pathlib import Path
 import hashlib
 import json
 import re
-from typing import Any
 from pathlib import Path
-from PySide6.QtCore import QStandardPaths
-
-from PySide6.QtCore import Qt
+from typing import Any
+from PySide6.QtCore import QStandardPaths, Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -28,85 +25,20 @@ from PySide6.QtWidgets import (
     QToolBar,
     QVBoxLayout,
     QWidget,
-    QHeaderView, QToolButton, QCheckBox,
+    QHeaderView,
+    QToolButton,
 )
 
 from core.paths import resource_path
 from core.version import APP_NAME, APP_VERSION
 from core.excel_loader import load_and_validate_excel
-from core.document_generator import generate_docx_for_employee
+from core.document_generator import generate_docx_for_employee, sanitize_key
 from core.pdf_converter import docx_to_pdf
+from core.validation_engine import parse_salary
 from ui.template_fields_dialog import TemplateFieldsDialog
 from ui.checkbox_delegate import CenteredCheckBoxDelegate
-from ui.license_info_dialog import LicenseInfoDialog
-
-_salary_re = re.compile(r"^\s*salariu\s*(>=|<=|=|>|<)\s*([\d\.,]+)\s*$", re.IGNORECASE)
-_salary_range_re = re.compile(r"^\s*salariu\s+([\d\.,]+)\s*-\s*([\d\.,]+)\s*$", re.IGNORECASE)
-
-def _parse_float_ro(s: str):
-    try:
-        x = s.strip().replace(" ", "")
-        # 1.234,56 -> 1234.56
-        if "," in x and "." in x:
-            x = x.replace(".", "").replace(",", ".")
-        else:
-            x = x.replace(",", ".")
-        return float(x)
-    except Exception:
-        return None
-
 
 HARD_MANDATORY_HEADERS = {"Nume", "Prenume", "Salariu"}  # regula aplicației
-
-
-def _safe_placeholder(name: str) -> str:
-    """
-    Transformă numele de coloană Excel într-un placeholder "safe" pentru DOCX:
-      - păstrează litere/cifre/underscore
-      - spații și punctuație -> underscore
-      - nu începe cu cifră
-    """
-    s = (name or "").strip()
-    s = re.sub(r"\s+", "_", s)
-    s = re.sub(r"[^0-9a-zA-Z_]", "_", s)
-    s = re.sub(r"_+", "_", s).strip("_")
-    if not s:
-        s = "Field"
-    if s[0].isdigit():
-        s = f"F_{s}"
-    return s
-
-
-def _parse_float_ro(value: str) -> float | None:
-    """
-    Acceptă:
-      5000
-      5.000
-      5,000
-      5.000,50
-      5000,50
-    """
-    if value is None:
-        return None
-    s = str(value).strip().replace(" ", "")
-    if not s:
-        return None
-
-    # dacă are și '.' și ',' => '.' e separator mii, ',' zecimal
-    if "." in s and "," in s:
-        s = s.replace(".", "").replace(",", ".")
-    else:
-        # dacă are doar ',' => zecimal
-        if "," in s and "." not in s:
-            s = s.replace(",", ".")
-        # dacă arată ca mii cu '.' (ex: 5.000.000) => scoate punctele
-        if re.fullmatch(r"\d{1,3}(\.\d{3})+", s):
-            s = s.replace(".", "")
-
-    try:
-        return float(s)
-    except Exception:
-        return None
 
 
 class MainWindow(QMainWindow):
@@ -118,17 +50,13 @@ class MainWindow(QMainWindow):
 
         # --- State ---
         self._last_df = None
-        self._last_source_path: str | None = None
 
         self._excel_headers: list[str] = []
         self._mandatory_headers: set[str] = set()
         self._col_map: dict[str, str] = {}            # ExcelHeader -> SafePlaceholder
-        self._safe_to_excel: dict[str, str] = {}      # SafePlaceholder -> ExcelHeader
         self._mandatory_safe: set[str] = set()        # set of safe placeholders that are mandatory
 
         self._last_generated_docx_files: list[Path] = []
-        self._last_generated_docx_dir: str | None = None
-        self._last_template_path: str | None = None
 
         # persist order
         self._column_order_key: str | None = None
@@ -349,15 +277,12 @@ class MainWindow(QMainWindow):
             self._mandatory_headers |= set(HARD_MANDATORY_HEADERS)
 
             # col map safe
-            self._col_map = {h: _safe_placeholder(h) for h in self._excel_headers}
-            self._safe_to_excel = {v: k for k, v in self._col_map.items()}
+            self._col_map = {h: sanitize_key(h) for h in self._excel_headers}
 
             # mandatory safe set
             self._mandatory_safe = {
                 self._col_map[h] for h in self._mandatory_headers if h in self._col_map
             }
-
-            self._last_source_path = path
 
             # persist reorder key
             self._column_order_key = self._make_column_order_key(path, self._excel_headers)
@@ -422,9 +347,6 @@ class MainWindow(QMainWindow):
         if len(table_headers) >= 3:
             hh.setSectionResizeMode(len(table_headers) - 1, QHeaderView.Stretch)
 
-    from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QTableWidgetItem
-
     def _populate_people_table(self) -> None:
         if self._last_df is None:
             self.table_people.setRowCount(0)
@@ -470,7 +392,7 @@ class MainWindow(QMainWindow):
     # ---------------------------
     def _on_header_section_moved(self, logicalIndex: int, oldVisualIndex: int, newVisualIndex: int) -> None:
         # blochează mutarea oricărei coloane în primele 2 poziții
-        if newVisualIndex < 2 or oldVisualIndex < 2:
+        if logicalIndex < 2 or newVisualIndex < 2 or oldVisualIndex < 2:
             hh = self.table_people.horizontalHeader()
             hh.blockSignals(True)
             hh.moveSection(newVisualIndex, oldVisualIndex)  # revert
@@ -526,29 +448,11 @@ class MainWindow(QMainWindow):
 
         self._update_columns_button_text()
 
-    def _parse_number_ro(self, s: str) -> float | None:
-        s = s.strip()
-        if not s:
-            return None
-        # acceptă "5 000", "5.000", "5000", "5000,50"
-        s = s.replace(" ", "")
-        # dacă are și "." și "," -> considerăm "." mii, "," zecimal
-        if "," in s and "." in s:
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            # dacă doar "," -> zecimal
-            s = s.replace(",", ".")
-        # dacă doar "." -> poate fi zecimal sau mii; nu ghicim mii, lăsăm float
-        try:
-            return float(s)
-        except Exception:
-            return None
-
     def _get_salary_value(self, row_items: dict[str, str]) -> float | None:
         # încearcă să ia salariul din coloana "Salariu" (case-insensitive)
         for k, v in row_items.items():
             if k.strip().lower() == "salariu":
-                return self._parse_number_ro(v)
+                return parse_salary(v)
         return None
 
     def _selected_search_columns(self) -> list[str]:
@@ -573,7 +477,7 @@ class MainWindow(QMainWindow):
         clauses = [c.strip() for c in t.split("|") if c.strip()]
 
         # ce coloane folosim pt text search
-        selected = getattr(self, "_search_headers_selected", None) or []
+        selected = self._selected_search_columns()
         selected_lower = {s.lower() for s in selected}
 
         def row_matches(r: int) -> bool:
@@ -609,8 +513,8 @@ class MainWindow(QMainWindow):
                 # --- interval: "salariu 5000-7000" (acceptă și "salariu: 5000-7000")
                 m_range = re.match(r"^salariu\s*[: ]\s*([0-9\., ]+)\s*-\s*([0-9\., ]+)\s*$", low)
                 if m_range:
-                    a = self._parse_number_ro(m_range.group(1))
-                    b = self._parse_number_ro(m_range.group(2))
+                    a = parse_salary(m_range.group(1))
+                    b = parse_salary(m_range.group(2))
                     if a is None or b is None or salary_val is None:
                         return False
                     lo2, hi2 = (a, b) if a <= b else (b, a)
@@ -622,7 +526,7 @@ class MainWindow(QMainWindow):
                 m_cmp = re.match(r"^salariu\s*(>=|<=|=|>|<)\s*([0-9\., ]+)\s*$", low)
                 if m_cmp:
                     op = m_cmp.group(1)
-                    x = self._parse_number_ro(m_cmp.group(2))
+                    x = parse_salary(m_cmp.group(2))
                     if x is None or salary_val is None:
                         return False
                     if op == ">" and not (salary_val > x): return False
@@ -716,7 +620,7 @@ class MainWindow(QMainWindow):
         missing: set[str] = set()
 
         for excel_name in self._excel_headers:
-            safe_key = self._col_map.get(excel_name, _safe_placeholder(excel_name))
+            safe_key = self._col_map.get(excel_name, sanitize_key(excel_name))
             raw = row.get(excel_name, None)
             val = "" if raw is None else str(raw).strip()
             if not val or val.lower() in ("nan", "<na>", "none"):
@@ -730,6 +634,16 @@ class MainWindow(QMainWindow):
     def on_generate_docx(self) -> None:
         if self._last_df is None:
             QMessageBox.information(self, "Generare DOCX", "Mai întâi importă un fișier Excel.")
+            return
+
+        missing_headers = HARD_MANDATORY_HEADERS - set(self._excel_headers)
+        if missing_headers:
+            missing = ", ".join(sorted(missing_headers))
+            QMessageBox.critical(
+                self,
+                "Coloane obligatorii lipsă",
+                f"Fișierul Excel nu conține coloanele obligatorii: {missing}.",
+            )
             return
 
         # selecția curentă (din item checkstate, NU din cellWidget)
@@ -751,8 +665,6 @@ class MainWindow(QMainWindow):
         )
         if not template_path:
             return
-        self._last_template_path = template_path
-
         default_dir = getattr(self, "_last_save_dir", "") or QStandardPaths.writableLocation(
             QStandardPaths.DocumentsLocation)
 
@@ -771,6 +683,7 @@ class MainWindow(QMainWindow):
         generated_files: list[Path] = []
         skipped_missing_mandatory = 0
         warnings_optional_total: set[str] = set()
+        prefix = self.doc_prefix_from_template(template_path)
 
         # safe keys for Nume/Prenume (dacă există în excel)
         safe_nume = self._col_map.get("Nume", "Nume")
@@ -795,8 +708,6 @@ class MainWindow(QMainWindow):
 
             nume = self.safe_name(raw_nume) if raw_nume and raw_nume != "—" else f"Row{excel_row}"
             prenume = self.safe_name(raw_prenume) if raw_prenume and raw_prenume != "—" else ""
-
-            prefix = self.doc_prefix_from_template(template_path)
 
             base = f"{prefix}_{nume}"
             if prenume:
@@ -830,7 +741,6 @@ class MainWindow(QMainWindow):
             generated_files.append(Path(saved))
 
         self._last_generated_docx_files = generated_files
-        self._last_generated_docx_dir = out_dir
         self.btn_generate_pdf.setEnabled(len(generated_files) > 0)
 
         QMessageBox.information(
@@ -1017,19 +927,6 @@ class MainWindow(QMainWindow):
         more = f" +{len(cols) - 2}" if len(cols) > 2 else ""
         self.btn_columns.setText(f"Coloane: {shown}{more}")
 
-    def _on_columns_changed(self, _checked: bool) -> None:
+    def _on_columns_changed(self) -> None:
         self._update_columns_button_text()
         self.apply_search_filter(self.search_input.text())
-
-    def _get_check_item(self, row: int) -> QTableWidgetItem | None:
-        """Returnează item-ul checkable din col 0 (sau None)."""
-        it = self.table_people.item(row, 0)
-        if not it:
-            return None
-        if not (it.flags() & Qt.ItemIsUserCheckable):
-            return None
-        return it
-
-
-
-

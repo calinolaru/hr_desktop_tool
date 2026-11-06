@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 import core.document_generator as dg
 
@@ -55,3 +56,18 @@ def test_build_context_handles_nan(monkeypatch):
     ctx, _, missing_optional = dg.build_context_with_missing(row)
     assert ctx["DataAngajare"] == dg.FALLBACK_VALUE
     assert "DataAngajare" in missing_optional
+
+
+def test_sanitize_key_matches_template_placeholder_format():
+    assert dg.sanitize_key("E-mail angajator") == "E_mail_angajator"
+    assert dg.sanitize_key("1 - Field") == "F_1_Field"
+    assert dg.sanitize_key("!!!") == "Field"
+
+
+def test_load_company_context_rejects_non_object_json(tmp_path, monkeypatch):
+    company_path = tmp_path / "company.json"
+    company_path.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(dg, "resource_path", lambda _: company_path)
+
+    with pytest.raises(ValueError, match="obiect JSON"):
+        dg.load_company_context()

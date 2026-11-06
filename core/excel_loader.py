@@ -12,23 +12,23 @@ def _read_header_styles(path: str) -> tuple[list[str], set[str]]:
       - mandatory_headers (headers care sunt bold în Excel)
     """
     wb = load_workbook(path, read_only=False, data_only=True)
-    ws = wb.active
+    try:
+        ws = wb.active
 
-    headers: list[str] = []
-    mandatory_headers: set[str] = set()
+        headers: list[str] = []
+        mandatory_headers: set[str] = set()
 
-    # Header row = 1
-    for cell in ws[1]:
-        header = str(cell.value).strip() if cell.value is not None else ""
-        headers.append(header)
+        # Header row = 1
+        for cell in ws[1]:
+            header = str(cell.value).strip() if cell.value is not None else ""
+            headers.append(header)
 
-        try:
             if cell.font and cell.font.bold and header:
                 mandatory_headers.add(header)
-        except Exception:
-            pass
 
-    return headers, mandatory_headers
+        return headers, mandatory_headers
+    finally:
+        wb.close()
 
 
 def load_and_validate_excel(path: str):

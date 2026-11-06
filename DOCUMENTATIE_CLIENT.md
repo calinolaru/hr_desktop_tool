@@ -8,7 +8,8 @@ pentru unul sau mai mulți angajați, pe baza unui fișier Excel (.xlsx).
 ## 1. Cerințe minime
 
 - Sistem de operare: Windows
-- Aplicația funcționează fără Microsoft Office instalat
+- Generarea DOCX nu necesită Microsoft Office.
+- Generarea PDF necesită Microsoft Word instalat.
 - Pentru editarea fișierului Excel se poate folosi:
   - Microsoft Excel
   - Google Sheets
@@ -27,15 +28,15 @@ pentru unul sau mai mulți angajați, pe baza unui fișier Excel (.xlsx).
 
 ### 2.2 Coloane obligatorii
 
-Fișierul Excel trebuie să conțină obligatoriu:
+Pentru generare, fișierul Excel trebuie să conțină:
 
 - Nume
 - Prenume
+- Salariu
 
-Aceste coloane sunt folosite pentru:
-- identificarea angajaților
-- căutare rapidă în aplicație
-- generarea automată a numelui fișierelor
+Coloanele marcate bold în header sunt, de asemenea, obligatorii. Dacă un astfel
+de câmp lipsește sau este gol, documentul pentru rândul respectiv nu se generează.
+Email-ul și CNP-ul nu sunt validate automat.
 
 Exemplu nume fișier:
 Contract_Popescu_Ion.docx
@@ -64,8 +65,9 @@ Toate aceste coloane pot fi utilizate în documente fără configurare supliment
 
 ### 3.1 Regula de bază
 
-Numele coloanei din Excel se folosește identic în documentul Word,
-între acolade duble.
+Placeholder-ele folosesc numele safe afișate în **Tools → Câmpuri template**.
+Spațiile și semnele de punctuație devin `_`; de exemplu,
+coloana `E-mail angajator` devine `{{E_mail_angajator}}`.
 
 Exemple:
 
@@ -75,8 +77,8 @@ Exemple:
 {{Functie}}
 
 Exemplu concret:
-- Coloană Excel: TelefonIntern
-- În document Word: {{TelefonIntern}}
+- Coloană Excel: `TelefonIntern`
+- În document Word: `{{TelefonIntern}}`
 
 ---
 
@@ -90,7 +92,9 @@ Aplicația va înlocui automat câmpul cu:
 
 —
 
-Documentul se generează normal, fără erori.
+Pentru câmpurile opționale, documentul se generează normal. Dacă lipsește un
+câmp obligatoriu (`Nume`, `Prenume`, `Salariu` sau o coloană bold), acel rând
+este omis la generare.
 
 ---
 
@@ -114,8 +118,8 @@ Comportament:
 2. Selectează fișierul dorit
 3. Aplicația:
    - încarcă datele
-   - validează câmpurile (Email, CNP etc.)
-   - afișează eventualele erori într-un tab separat
+   - citește header-ele bold pentru a determina câmpuri obligatorii
+   - nu validează automat formatul email-ului sau CNP-ului
 
 ---
 
@@ -125,20 +129,10 @@ Comportament:
 - fiecare rând reprezintă un angajat
 - există o coloană „Export” (checkbox)
 
-### 5.1 Rânduri invalide
+### 5.1 Căutare rapidă
 
-- Rândurile cu date incorecte sunt evidențiate vizual
-- Aceste rânduri nu pot fi selectate pentru export
-- Detaliile apar în tab-ul „Erori”
-
----
-
-### 5.2 Căutare rapidă
-
-Poți căuta după:
-- Nume
-- Prenume
-- Nume + Prenume
+Poți alege coloanele căutate din butonul „Coloane”. Criteriile de salariu acceptă,
+de exemplu, `salariu>5000` și `salariu 5000-7000`; separă criterii multiple cu `|`.
 
 Lista se filtrează instant, fără scroll.
 
@@ -147,8 +141,9 @@ Lista se filtrează instant, fără scroll.
 ## 6. Selectarea angajaților
 
 - Poți selecta manual una sau mai multe persoane
-- Butonul „Selectează valide” bifează automat doar rândurile fără erori
-- Rândurile invalide nu pot fi selectate
+- „Selectează tot” bifează toate rândurile
+- „Selectează filtrate” bifează doar rândurile vizibile după căutare
+- Verificarea câmpurilor obligatorii se face la generare; rândurile incomplete sunt omise
 
 ---
 
@@ -160,7 +155,7 @@ Lista se filtrează instant, fără scroll.
 
 Documentele se generează doar pentru:
 - angajații selectați
-- angajații cu date valide
+- angajații care au toate câmpurile obligatorii completate
 
 ---
 
@@ -181,7 +176,7 @@ Dacă există nume duplicate, aplicația adaugă automat un sufix pentru diferen
 După generarea DOCX:
 1. Apasă „Generează PDF”
 2. PDF-urile se creează doar pentru documentele generate în ultima operație
-3. PDF-urile sunt salvate într-un folder separat
+3. PDF-urile sunt salvate lângă fișierele DOCX (necesită Microsoft Word)
 
 ---
 

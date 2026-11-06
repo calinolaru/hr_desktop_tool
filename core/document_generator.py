@@ -50,9 +50,12 @@ def load_company_context() -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Nu s-a putut citi {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} trebuie să conțină un obiect JSON.")
+    return data
 
 
 def build_context_with_missing(row: Any) -> Tuple[dict[str, Any], list[str], list[str]]:
@@ -143,11 +146,13 @@ def sanitize_key(name: str) -> str:
     # compactează underscores
     s = re.sub(r"_+", "_", s).strip("_")
 
-    # dacă începe cu cifră, prefix
-    if s and s[0].isdigit():
-        s = f"col_{s}"
+    if not s:
+        s = "Field"
 
-    return s or "col"
+    if s[0].isdigit():
+        s = f"F_{s}"
+
+    return s
 
 
 def build_dynamic_context_with_missing(
@@ -163,21 +168,7 @@ def build_dynamic_context_with_missing(
 
     # row e un pandas Series; row.get(original_col) merge
     for original, safe in col_map.items():
-        val = row.get(original)
-
-        # normalize + fallback
-        if val is None:
-            norm = FALLBACK_VALUE
-        else:
-            # pandas NaN
-            try:
-                import pandas as pd
-                if pd.isna(val):
-                    norm = FALLBACK_VALUE
-                else:
-                    norm = str(val).strip() if str(val).strip() else FALLBACK_VALUE
-            except Exception:
-                norm = str(val).strip() if str(val).strip() else FALLBACK_VALUE
+        norm = normalize_value(row.get(original))
 
         ctx[safe] = norm
 
@@ -185,21 +176,3 @@ def build_dynamic_context_with_missing(
             missing_optional.append(safe)
 
     return ctx, missing_optional
-
-
-def generate_docx_for_employee(
-    template_path: str | Path,
-    output_dir: str | Path,
-    context: dict[str, Any],
-    filename: str,
-) -> Path:
-    template_path = Path(template_path)
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    doc = DocxTemplate(str(template_path))
-    doc.render(context)
-
-    out_path = output_dir / filename
-    doc.save(str(out_path))
-    return out_path

@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
-from typing import Optional
 
 from core.license_crypto import sha256_hex
 

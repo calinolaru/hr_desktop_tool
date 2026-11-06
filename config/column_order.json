@@ -1,10 +1,10 @@
 {
   "a4db3abd5584c366e897292274fb4976fe7b34b9d5bf11ccef50971fcc541f48": [
     "Nume",
-    "Prenume",
-    "Salariu",
-    "Functie",
     "IBAN",
+    "Salariu",
+    "Prenume",
+    "Functie",
     "CNP",
     "DataAngajare",
     "Email",

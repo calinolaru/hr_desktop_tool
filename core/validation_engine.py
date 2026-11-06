@@ -1,9 +1,8 @@
 # core/validation_engine.py
 from __future__ import annotations
 
+import re
 from typing import Any
-
-from datetime import datetime
 
 
 def _is_empty(v: Any) -> bool:
@@ -20,11 +19,16 @@ def _is_empty(v: Any) -> bool:
         return False
 
 
-def _parse_salary(v: Any) -> float | None:
+def parse_salary(v: Any) -> float | None:
     if _is_empty(v):
         return None
     s = str(v).strip().replace(" ", "")
-    s = s.replace(",", ".")
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        s = s.replace(",", ".")
+    elif re.fullmatch(r"[+-]?\d{1,3}(?:\.\d{3})+", s):
+        s = s.replace(".", "")
     try:
         return float(s)
     except Exception:
@@ -53,30 +57,7 @@ def validate_row(row: Any, mandatory_headers: set[str] | None = None) -> dict[st
     if "Salariu" in row.index:
         val = row.get("Salariu")
         if not _is_empty(val):
-            if _parse_salary(val) is None:
+            if parse_salary(val) is None:
                 errors["Salariu"] = "Salariu invalid (trebuie numeric)."
 
     return errors
-
-
-def _parse_date_strict(value: Any) -> bool:
-    """
-    True dacă value e o dată validă.
-    Acceptă:
-      - datetime/date (citite automat din Excel)
-      - string: YYYY-MM-DD, DD.MM.YYYY, DD/MM/YYYY
-    """
-    if _is_empty(value):
-        return False
-
-    if isinstance(value, (datetime, date)):
-        return True
-
-    s = str(value).strip()
-    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y"):
-        try:
-            datetime.strptime(s, fmt)
-            return True
-        except ValueError:
-            continue
-    return False

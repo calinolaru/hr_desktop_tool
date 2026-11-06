@@ -1,17 +1,19 @@
 # app.py
 from __future__ import annotations
 import sys
-from core.license_manager import app_base_dir
-from ui.main_window import MainWindow
-from core.license_manager import load_and_validate_license, LicenseError
-from core.machine_fingerprint import get_machine_fingerprint
-from core.license_manager import days_until_expiry
-from ui.style import APP_QSS
 from PySide6.QtWidgets import QApplication, QMessageBox, QStyleFactory
 from PySide6.QtGui import QIcon
+
+from core.license_manager import (
+    LicenseError,
+    app_base_dir,
+    days_until_expiry,
+    load_and_validate_license,
+)
+from core.machine_fingerprint import get_machine_fingerprint
 from core.paths import resource_path
-
-
+from ui.main_window import MainWindow
+from ui.style import APP_QSS
 
 
 def main() -> None:
@@ -39,7 +41,7 @@ def main() -> None:
                 QMessageBox.warning(
                     None,
                     "Licență Trial",
-                    "Licența Trial expiră MÂINE.\n\n"
+                    "Licența Trial expiră în cel mult 24 de ore.\n\n"
                     "Contactează furnizorul pentru activare."
                 )
             elif days_left <= 3:
@@ -61,20 +63,21 @@ def main() -> None:
         # machine_id.txt LÂNGĂ EXE
         out = app_base_dir() / "machine_id.txt"
 
-        # scrie DOAR dacă nu există
-        if not out.exists():
-            try:
-                out.write_text(machine_id, encoding="utf-8")
-            except Exception:
-                pass
+        try:
+            out.write_text(machine_id, encoding="utf-8")
+            machine_id_details = f"Machine ID este disponibil în fișierul:\n{out.resolve()}"
+        except OSError as write_error:
+            machine_id_details = (
+                f"Nu s-a putut salva fișierul {out}:\n{write_error}\n\n"
+                f"Machine ID: {machine_id}"
+            )
 
         QMessageBox.critical(
             None,
             "Licență lipsă / invalidă",
             f"{str(e)}\n\n"
-            "Machine ID este disponibil în fișierul:\n"
-            f"{out.resolve()}\n\n"
-            "Trimite acest fișier furnizorului."
+            f"{machine_id_details}\n\n"
+            "Trimite Machine ID-ul sau fișierul furnizorului."
         )
         return  # IMPORTANT: nu continua, altfel 'lic' nu există
 

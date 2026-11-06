@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QHeaderView,
 )
-from typing import Iterable
 
 
 class TemplateFieldsDialog(QDialog):

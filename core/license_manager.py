@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from core.trial_guard import enforce_no_time_rollback
+from core.trial_guard import TimeRollbackError, enforce_no_time_rollback
 from core.license_crypto import b64decode_json, verify_signature
 from core.machine_fingerprint import get_machine_fingerprint
 
@@ -68,6 +69,9 @@ def load_and_validate_license() -> LicenseInfo:
     except Exception:
         raise LicenseError("Fișierul license.json este invalid (nu este JSON).")
 
+    if not isinstance(raw, dict):
+        raise LicenseError("Fișierul license.json trebuie să conțină un obiect JSON.")
+
     payload_b64 = str(raw.get("payload", "")).strip()
     signature_b64 = str(raw.get("signature", "")).strip()
 
@@ -83,6 +87,9 @@ def load_and_validate_license() -> LicenseInfo:
         data = b64decode_json(payload_b64)
     except Exception:
         raise LicenseError("Licență invalidă (payload base64 corupt).")
+
+    if not isinstance(data, dict):
+        raise LicenseError("Licență invalidă (payload-ul trebuie să fie un obiect JSON).")
 
     # --- required fields ---
     for k in ("type", "company", "vat", "machine", "issued_at"):
@@ -140,4 +147,4 @@ def days_until_expiry(lic: LicenseInfo) -> int | None:
     exp = _parse_iso(lic.expires)
     now = _utc_now()
     delta = exp - now
-    return max(0, delta.days)
+    return max(0, math.ceil(delta.total_seconds() / 86400))
